@@ -106,7 +106,8 @@ FACE_MATCH_THRESHOLD = 0.47
 FACE_RETRY_THRESHOLD = 0.58
 COOLDOWN_SECONDS = 300
 ENTRY_DUPLICATE_SECONDS = 30
-SESSION_LIMIT_MINUTES = 180
+SESSION_LIMIT_MINUTES = 70
+SESSION_WARNING_MINUTES = 5
 CLUB_TIMEZONE = ZoneInfo('Asia/Kolkata')
 RECENT_SCAN_EVENTS: deque[dict[str, Any]] = deque(maxlen=12)
 ELEVENLABS_MODEL_ID = 'eleven_multilingual_v2'
@@ -431,6 +432,18 @@ def _session_duration_minutes(session: SessionRecord) -> int:
   return max(0, int((end_time - session.started_at).total_seconds() // 60))
 
 
+def _session_deadline(session: SessionRecord) -> datetime:
+  return session.slot_end_at or (session.started_at + timedelta(minutes=SESSION_LIMIT_MINUTES))
+
+
+def _session_remaining_seconds(session: SessionRecord, now: datetime | None = None) -> int:
+  if session.status != SessionStatus.ACTIVE:
+    return 0
+
+  reference_time = now or utcnow()
+  return max(0, int((_session_deadline(session) - reference_time).total_seconds()))
+
+
 def _session_tts(session: SessionRecord) -> str:
   if session.status == SessionStatus.ACTIVE:
     return 'Attendance active'
@@ -448,10 +461,7 @@ def _serialize_session(session: SessionRecord) -> dict[str, Any]:
   started_at = _serialize_datetime(session.started_at)
   ended_at = _serialize_datetime(session.ended_at)
   duration_minutes = _session_duration_minutes(session)
-  remaining_seconds = 0
-
-  if session.status == SessionStatus.ACTIVE and session.slot_end_at:
-    remaining_seconds = max(0, int((session.slot_end_at - utcnow()).total_seconds()))
+  remaining_seconds = _session_remaining_seconds(session)
 
   return {
     'id': session.id,
@@ -856,7 +866,7 @@ def _expire_session(
   if session.status != SessionStatus.ACTIVE:
     return
 
-  ended_at = session.slot_end_at or utcnow()
+  ended_at = _session_deadline(session)
   session.status = SessionStatus.EXPIRED
   session.ended_at = ended_at
   _create_timeline_event(
@@ -870,13 +880,17 @@ def _expire_session(
 
 
 def _expire_overdue_sessions(db: Session, user_id: str | None = None) -> None:
+  now = utcnow()
+  fixed_limit_cutoff = now - timedelta(minutes=SESSION_LIMIT_MINUTES)
   query = (
     select(SessionRecord)
     .options(selectinload(SessionRecord.user), selectinload(SessionRecord.slot))
     .where(
       SessionRecord.status == SessionStatus.ACTIVE,
-      SessionRecord.slot_end_at.is_not(None),
-      SessionRecord.slot_end_at <= utcnow(),
+      or_(
+        (SessionRecord.slot_end_at.is_not(None) & (SessionRecord.slot_end_at <= now)),
+        (SessionRecord.slot_end_at.is_(None) & (SessionRecord.started_at <= fixed_limit_cutoff)),
+      ),
     )
   )
 
@@ -889,7 +903,15 @@ def _expire_overdue_sessions(db: Session, user_id: str | None = None) -> None:
     return
 
   for session in sessions:
-    _expire_session(db, session=session)
+    _expire_session(
+      db,
+      session=session,
+      note=(
+        'Session ended when the assigned slot closed.'
+        if session.slot_end_at
+        else f'Session ended automatically after {SESSION_LIMIT_MINUTES} minutes.'
+      ),
+    )
 
   db.commit()
 
@@ -1107,6 +1129,7 @@ def _record_scan_event(
   status: str,
   message: str,
   name: str | None,
+  user_id: str | None,
   confidence: float,
   area: str,
   frames_captured: int,
@@ -1120,6 +1143,7 @@ def _record_scan_event(
     'status': status,
     'message': message,
     'name': name,
+    'userId': user_id,
     'confidence': round(confidence, 2),
     'area': area,
     'framesCaptured': frames_captured,
@@ -1149,10 +1173,12 @@ def _build_scan_response(
   area: str,
   frames_captured: int,
 ) -> dict[str, Any]:
+  resolved_user_id = (session or {}).get('userId')
   event = _record_scan_event(
     status=status,
     message=message,
     name=name,
+    user_id=resolved_user_id,
     confidence=confidence,
     area=area,
     frames_captured=frames_captured,
@@ -1168,6 +1194,7 @@ def _build_scan_response(
     'tone': event['tone'],
     'confidence': confidence,
     'name': name,
+    'userId': resolved_user_id,
     'duplicateWarning': duplicate_warning,
     'ttsMessage': tts_message,
     'attendanceAction': attendance_action,
@@ -1181,6 +1208,7 @@ def _build_scan_response(
 def _serialize_live_feed_event(event: dict[str, Any]) -> dict[str, Any]:
   return {
     'id': event['id'],
+    'userId': event.get('userId'),
     'name': event['name'] or 'Unknown Face',
     'confidence': event['confidence'],
     'status': _feed_status_from_scan_status(event['status']),
@@ -2418,12 +2446,13 @@ def get_user_payments(db: Session, user: User) -> list[dict[str, Any]]:
 
 
 def get_session_timer(db: Session, session_id: str) -> dict[str, Any]:
+  _expire_overdue_sessions(db)
   session = _get_session_by_id(db, session_id)
   duration_min = _session_duration_minutes(session)
-  remaining_sec = session.remainingSeconds or 0
+  remaining_sec = _session_remaining_seconds(session)
   remaining_min = remaining_sec // 60
-  warning_5min = remaining_min <= 5 and remaining_min > 0
-  overtime_count = max(0, (duration_min - 70) // 10)
+  warning_5min = remaining_sec > 0 and remaining_sec <= (SESSION_WARNING_MINUTES * 60)
+  overtime_count = max(0, (duration_min - SESSION_LIMIT_MINUTES) // 10)
   overtime_count = min(overtime_count, 5)  # Cap at 5
   
   # Success announcement every hour
@@ -2431,14 +2460,22 @@ def get_session_timer(db: Session, session_id: str) -> dict[str, Any]:
   
   return {
     'sessionId': session.id,
+    'userId': session.user_id,
+    'name': session.user.name,
+    'status': session.status.value,
+    'limitMinutes': SESSION_LIMIT_MINUTES,
     'durationMinutes': duration_min,
+    'remainingSeconds': remaining_sec,
     'remainingMinutes': remaining_min,
     'warning5Min': warning_5min,
     'overtimeCount': overtime_count,
     'hourlyAnnouncement': hourly_annc,
-    'ttsWarning': f"Warning {session.name}: {remaining_min} min left!" if warning_5min else None,
-    'ttsOvertime': f"Time over {session.name}! ({overtime_count}/5)" if overtime_count > 0 else None,
-    'ttsHourly': f"Hourly check: {session.name}, you have been here for {duration_min} minutes." if hourly_annc else None
+    'ttsWarning': f"Warning {session.user.name}: {remaining_min} min left!" if warning_5min else None,
+    'ttsOvertime': f"Time over {session.user.name}! ({overtime_count}/5)" if overtime_count > 0 else None,
+    'ttsHourly': (
+      f"Hourly check: {session.user.name}, you have been here for {duration_min} minutes."
+      if hourly_annc else None
+    ),
   }
 
 
