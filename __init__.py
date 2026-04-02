@@ -1,0 +1,1 @@
+"""CaperClub FastAPI backend package."""
