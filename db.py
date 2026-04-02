@@ -6,6 +6,7 @@ from pathlib import Path
 from urllib.parse import quote_plus
 
 import pymysql
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -23,6 +24,36 @@ class Settings(BaseSettings):
   db_name: str = 'caperclub'
   db_user: str = 'root'
   db_password: str = 'Abhijeet@7654'
+  database_url_value: str = Field(
+    default='',
+    validation_alias=AliasChoices(
+      'CAPERCLUB_DATABASE_URL',
+      'MYSQL_URL',
+      'DATABASE_URL',
+      'MYSQL_PUBLIC_URL',
+      'MYSQL_PRIVATE_URL',
+    ),
+  )
+  mysql_host_value: str = Field(
+    default='',
+    validation_alias=AliasChoices('MYSQLHOST', 'DB_HOST'),
+  )
+  mysql_port_value: int | None = Field(
+    default=None,
+    validation_alias=AliasChoices('MYSQLPORT', 'DB_PORT'),
+  )
+  mysql_database_value: str = Field(
+    default='',
+    validation_alias=AliasChoices('MYSQLDATABASE', 'DB_NAME'),
+  )
+  mysql_user_value: str = Field(
+    default='',
+    validation_alias=AliasChoices('MYSQLUSER', 'DB_USER'),
+  )
+  mysql_password_value: str = Field(
+    default='',
+    validation_alias=AliasChoices('MYSQLPASSWORD', 'DB_PASSWORD'),
+  )
   media_backend: str = 'r2'
   r2_endpoint_url: str = 'https://94b941e2dd9341b958247c2cb68276e7.r2.cloudflarestorage.com/caperclubdata'
   r2_bucket: str = 'caperclubdata'
@@ -69,31 +100,24 @@ class Settings(BaseSettings):
 
   @property
   def database_url_override(self) -> str:
-    return (
-      os.getenv('CAPERCLUB_DATABASE_URL')
-      or os.getenv('MYSQL_URL')
-      or os.getenv('DATABASE_URL')
-      or ''
-    ).strip()
+    return self.database_url_value.strip()
 
   @property
   def database_config(self) -> dict[str, str | int]:
     return {
-      'host': (os.getenv('MYSQLHOST') or self.db_host).strip(),
-      'port': int(os.getenv('MYSQLPORT') or self.db_port),
-      'name': (os.getenv('MYSQLDATABASE') or self.db_name).strip(),
-      'user': (os.getenv('MYSQLUSER') or self.db_user).strip(),
-      'password': os.getenv('MYSQLPASSWORD') or self.db_password,
+      'host': (self.mysql_host_value or self.db_host).strip(),
+      'port': self.mysql_port_value if self.mysql_port_value is not None else self.db_port,
+      'name': (self.mysql_database_value or self.db_name).strip(),
+      'user': (self.mysql_user_value or self.db_user).strip(),
+      'password': self.mysql_password_value or self.db_password,
     }
 
   @property
   def is_managed_database(self) -> bool:
     return bool(
       self.database_url_override
-      or os.getenv('MYSQLHOST')
-      or os.getenv('MYSQLDATABASE')
-      or os.getenv('MYSQL_URL')
-      or os.getenv('DATABASE_URL')
+      or self.mysql_host_value
+      or self.mysql_database_value
     )
 
 
@@ -258,11 +282,29 @@ KNOWN_APP_TABLES = {
 }
 
 
+def _is_railway_environment() -> bool:
+  return bool(
+    os.getenv('RAILWAY_PROJECT_ID')
+    or os.getenv('RAILWAY_SERVICE_ID')
+    or os.getenv('RAILWAY_ENVIRONMENT')
+    or os.getenv('RAILWAY_ENVIRONMENT_NAME')
+  )
+
+
 def _ensure_database_exists() -> None:
   if settings.is_managed_database:
     return
 
   config = settings.database_config
+
+  if str(config['host']).strip().lower() in {'127.0.0.1', 'localhost'} and _is_railway_environment():
+    raise RuntimeError(
+      'Railway deployment started without MySQL connection settings. '
+      'Set CAPERCLUB_DATABASE_URL, MYSQL_URL, DATABASE_URL, MYSQL_PUBLIC_URL, '
+      'MYSQL_PRIVATE_URL, or MYSQLHOST/MYSQLPORT/MYSQLDATABASE/MYSQLUSER/MYSQLPASSWORD '
+      'on the backend service.'
+    )
+
   connection = pymysql.connect(
     host=str(config['host']),
     port=int(config['port']),
