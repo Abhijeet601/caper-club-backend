@@ -18,6 +18,8 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 if __package__:
+  from .db import get_settings
+  from .media_storage import MediaStorage
   from .models import (
     Announcement,
     FaceEmbedding,
@@ -52,6 +54,8 @@ if __package__:
   )
   from .security import create_access_token, hash_password, verify_password
 else:
+  from db import get_settings
+  from media_storage import MediaStorage
   from models import (
     Announcement,
     FaceEmbedding,
@@ -95,6 +99,8 @@ UNKNOWN_STORAGE = STORAGE_ROOT / 'unknown'
 
 for directory in (USER_STORAGE, SESSION_STORAGE, UNKNOWN_STORAGE):
   directory.mkdir(parents=True, exist_ok=True)
+
+MEDIA_STORAGE = MediaStorage(get_settings(), STORAGE_ROOT)
 
 FACE_MATCH_THRESHOLD = 0.47
 FACE_RETRY_THRESHOLD = 0.58
@@ -525,6 +531,14 @@ def _serialize_announcement(item: Announcement) -> dict[str, Any]:
   }
 
 
+def _first_face_asset_url(user: User) -> str | None:
+  for embedding in user.face_embeddings:
+    image_data = str(embedding.image_data or '').strip()
+    if image_data.startswith('http://') or image_data.startswith('https://'):
+      return image_data
+  return None
+
+
 def _serialize_auth_user(user: User) -> dict[str, Any]:
   last_action = _serialize_attendance_action(user.last_action)
   last_action_at = _serialize_datetime(user.last_action_at)
@@ -542,6 +556,7 @@ def _serialize_auth_user(user: User) -> dict[str, Any]:
     'paymentAmount': _resolve_payment_amount(user),
     'paymentMode': _resolve_payment_mode(user),
     'paymentStatus': _resolve_payment_status(user),
+    'faceImageUrl': _first_face_asset_url(user),
     'lastAction': last_action,
     'lastActionAt': last_action_at,
     'lastTimestamp': last_action_at,
@@ -582,6 +597,7 @@ def _serialize_user(user: User) -> dict[str, Any]:
     'paymentAmount': _resolve_payment_amount(user),
     'paymentMode': _resolve_payment_mode(user),
     'paymentStatus': _resolve_payment_status(user),
+    'faceImageUrl': _first_face_asset_url(user),
     'lastAction': last_action,
     'lastActionAt': last_action_at,
     'lastTimestamp': last_action_at,
@@ -1041,24 +1057,21 @@ def _descriptor_centroid(encodings: list[np.ndarray]) -> list[float] | None:
 
 
 def _save_user_face_image(user_id: str, image_bytes: bytes, index: int) -> str:
-  destination = USER_STORAGE / user_id / 'faces'
-  destination.mkdir(parents=True, exist_ok=True)
   timestamp = utcnow().strftime('%Y%m%d_%H%M%S_%f')
-  path = destination / f'face_{index}_{timestamp}.jpg'
-  path.write_bytes(image_bytes)
-  return str(path.relative_to(STORAGE_ROOT))
+  key = f'users/{user_id}/faces/face_{index}_{timestamp}.jpg'
+  return MEDIA_STORAGE.save_bytes(key, image_bytes, content_type='image/jpeg')
 
 
 def _save_session_image(session_id: str, image_bytes: bytes, prefix: str) -> None:
-  destination = SESSION_STORAGE / session_id
-  destination.mkdir(parents=True, exist_ok=True)
   timestamp = utcnow().strftime('%Y%m%d_%H%M%S_%f')
-  (destination / f'{prefix}_{timestamp}.jpg').write_bytes(image_bytes)
+  key = f'sessions/{session_id}/{prefix}_{timestamp}.jpg'
+  MEDIA_STORAGE.save_bytes(key, image_bytes, content_type='image/jpeg')
 
 
 def _save_unknown_image(image_bytes: bytes) -> None:
   timestamp = utcnow().strftime('%Y%m%d_%H%M%S_%f')
-  (UNKNOWN_STORAGE / f'unknown_{timestamp}.jpg').write_bytes(image_bytes)
+  key = f'unknown/unknown_{timestamp}.jpg'
+  MEDIA_STORAGE.save_bytes(key, image_bytes, content_type='image/jpeg')
 
 
 def _cooldown_remaining_seconds(db: Session, user_id: str) -> int:
@@ -1892,6 +1905,7 @@ def get_user_embeddings(db: Session) -> list[dict[str, Any]]:
         'name': user.name,
         'descriptor': centroid,
         'sampleCount': len(encodings),
+        'faceImageUrl': _first_face_asset_url(user),
         'lastAction': _serialize_attendance_action(user.last_action),
         'lastActionAt': _serialize_datetime(user.last_action_at),
         'membershipStatus': _membership_status(user),

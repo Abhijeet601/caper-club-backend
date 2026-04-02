@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import os
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -22,6 +23,13 @@ class Settings(BaseSettings):
   db_name: str = 'caperclub'
   db_user: str = 'root'
   db_password: str = 'Abhijeet@7654'
+  media_backend: str = 'r2'
+  r2_endpoint_url: str = 'https://94b941e2dd9341b958247c2cb68276e7.r2.cloudflarestorage.com/caperclubdata'
+  r2_bucket: str = 'caperclubdata'
+  r2_public_base_url: str = 'https://pub-9ed9b2e4413a49cb847df3a991647b68.r2.dev'
+  r2_region: str = 'auto'
+  r2_access_key_id: str = ''
+  r2_secret_access_key: str = ''
   jwt_secret: str = 'caperclub-dev-secret-key-2026-rotate'
   jwt_algorithm: str = 'HS256'
   access_token_expiry_minutes: int = 12 * 60
@@ -40,10 +48,17 @@ class Settings(BaseSettings):
 
   @property
   def database_url(self) -> str:
-    password = quote_plus(self.db_password)
+    override = self.database_url_override
+    if override:
+      if override.startswith('mysql://'):
+        return override.replace('mysql://', 'mysql+pymysql://', 1)
+      return override
+
+    config = self.database_config
+    password = quote_plus(config['password'])
     return (
-      f'mysql+pymysql://{self.db_user}:{password}'
-      f'@{self.db_host}:{self.db_port}/{self.db_name}'
+      f"mysql+pymysql://{config['user']}:{password}"
+      f"@{config['host']}:{config['port']}/{config['name']}"
     )
 
   @property
@@ -51,6 +66,35 @@ class Settings(BaseSettings):
     configured_origins = f'{self.cors_origin},{self.cors_origins}'
     origins = [origin.strip() for origin in configured_origins.split(',') if origin.strip()]
     return list(dict.fromkeys(origins))
+
+  @property
+  def database_url_override(self) -> str:
+    return (
+      os.getenv('CAPERCLUB_DATABASE_URL')
+      or os.getenv('MYSQL_URL')
+      or os.getenv('DATABASE_URL')
+      or ''
+    ).strip()
+
+  @property
+  def database_config(self) -> dict[str, str | int]:
+    return {
+      'host': (os.getenv('MYSQLHOST') or self.db_host).strip(),
+      'port': int(os.getenv('MYSQLPORT') or self.db_port),
+      'name': (os.getenv('MYSQLDATABASE') or self.db_name).strip(),
+      'user': (os.getenv('MYSQLUSER') or self.db_user).strip(),
+      'password': os.getenv('MYSQLPASSWORD') or self.db_password,
+    }
+
+  @property
+  def is_managed_database(self) -> bool:
+    return bool(
+      self.database_url_override
+      or os.getenv('MYSQLHOST')
+      or os.getenv('MYSQLDATABASE')
+      or os.getenv('MYSQL_URL')
+      or os.getenv('DATABASE_URL')
+    )
 
 
 @lru_cache(maxsize=1)
@@ -215,11 +259,15 @@ KNOWN_APP_TABLES = {
 
 
 def _ensure_database_exists() -> None:
+  if settings.is_managed_database:
+    return
+
+  config = settings.database_config
   connection = pymysql.connect(
-    host=settings.db_host,
-    port=settings.db_port,
-    user=settings.db_user,
-    password=settings.db_password,
+    host=str(config['host']),
+    port=int(config['port']),
+    user=str(config['user']),
+    password=str(config['password']),
     charset='utf8mb4',
     autocommit=True,
   )
@@ -228,7 +276,7 @@ def _ensure_database_exists() -> None:
     with connection.cursor() as cursor:
       cursor.execute(
         'CREATE DATABASE IF NOT EXISTS '
-        f'`{settings.db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci'
+        f"`{config['name']}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
       )
   finally:
     connection.close()
