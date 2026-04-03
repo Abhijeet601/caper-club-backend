@@ -11,6 +11,9 @@ from datetime import date, datetime, time as dt_time, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
+from urllib import error as urllib_error
+from urllib.parse import quote, urlencode
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -335,6 +338,17 @@ def _resolve_slot_window(slot: TimeSlot, reference_utc: datetime | None = None) 
     candidate_date = candidate_date - timedelta(days=1)
 
   return _slot_window_for_local_date(slot, candidate_date)
+
+
+def _resolve_session_slot_window(
+  slot: TimeSlot | None,
+  *,
+  reference_utc: datetime | None = None,
+) -> tuple[datetime | None, datetime | None]:
+  if slot is None:
+    return None, None
+
+  return _resolve_slot_window(slot, reference_utc)
 
 
 def _slot_status_payload(
@@ -2112,6 +2126,7 @@ def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
       frames_captured=1,
     )
 
+  slot_start_at, slot_end_at = _resolve_session_slot_window(user.slot, reference_utc=attendance_time)
   session = SessionRecord(
     user=user,
     slot=user.slot,
@@ -2119,8 +2134,8 @@ def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
     status=SessionStatus.ACTIVE,
     confidence=confidence,
     started_at=attendance_time,
-    slot_start_at=None,
-    slot_end_at=None,
+    slot_start_at=slot_start_at,
+    slot_end_at=slot_end_at,
   )
   db.add(session)
   db.flush()
@@ -2251,6 +2266,9 @@ def perform_access_scan(db: Session, input_data: AccessScanInput) -> dict[str, A
     active_session.status = SessionStatus.ENDED
     duration_minutes = _session_duration_minutes(active_session)
     over_limit = duration_minutes >= SESSION_LIMIT_MINUTES
+    user.last_action = 'OUT'
+    user.last_action_at = attendance_time
+    user.updated_at = attendance_time
     _save_session_image(active_session.id, image_bytes, 'exit')
     _create_timeline_event(
       db,
@@ -2300,6 +2318,7 @@ def perform_access_scan(db: Session, input_data: AccessScanInput) -> dict[str, A
       frames_captured=input_data.capturedFrames,
     )
 
+  slot_start_at, slot_end_at = _resolve_session_slot_window(user.slot, reference_utc=attendance_time)
   session = SessionRecord(
     user=user,
     slot=user.slot,
@@ -2307,11 +2326,14 @@ def perform_access_scan(db: Session, input_data: AccessScanInput) -> dict[str, A
     status=SessionStatus.ACTIVE,
     confidence=confidence,
     started_at=attendance_time,
-    slot_start_at=None,
-    slot_end_at=None,
+    slot_start_at=slot_start_at,
+    slot_end_at=slot_end_at,
   )
   db.add(session)
   db.flush()
+  user.last_action = 'IN'
+  user.last_action_at = attendance_time
+  user.updated_at = attendance_time
   _save_session_image(session.id, image_bytes, 'entry')
   _create_timeline_event(
     db,
@@ -2348,18 +2370,24 @@ def start_session(db: Session, input_data: SessionStartInput) -> dict[str, Any]:
   if _active_session_for_user(db, user.id):
     raise ApiError('This user already has an active session.', 400)
 
+  started_at = utcnow()
+  slot_start_at, slot_end_at = _resolve_session_slot_window(user.slot, reference_utc=started_at)
+
   session = SessionRecord(
     user=user,
     slot=user.slot,
     area=input_data.area,
     status=SessionStatus.ACTIVE,
     confidence=input_data.confidence,
-    slot_start_at=None,
-    slot_end_at=None,
+    started_at=started_at,
+    slot_start_at=slot_start_at,
+    slot_end_at=slot_end_at,
   )
   db.add(session)
-  db.commit()
-  session = _get_session_by_id(db, session.id)
+  db.flush()
+  user.last_action = 'IN'
+  user.last_action_at = started_at
+  user.updated_at = started_at
   _create_timeline_event(
     db,
     user=user,
@@ -2378,8 +2406,12 @@ def end_session(db: Session, input_data: SessionEndInput) -> dict[str, Any]:
   if session.status != SessionStatus.ACTIVE:
     raise ApiError('Session is not active.', 400)
 
+  ended_at = utcnow()
   session.status = SessionStatus.ENDED
-  session.ended_at = utcnow()
+  session.ended_at = ended_at
+  session.user.last_action = 'OUT'
+  session.user.last_action_at = ended_at
+  session.user.updated_at = ended_at
   duration_minutes = _session_duration_minutes(session)
   _create_timeline_event(
     db,
@@ -2523,6 +2555,69 @@ $synth.Dispose()
   finally:
     temp_path.unlink(missing_ok=True)
 
-def generate_tts(text: str) -> bytes:
-  _ = text
-  raise ApiError('Server-side TTS is disabled. Use the browser Web Speech API.', 410)
+
+def _audio_mime_type(output_format: str) -> str:
+  normalized = str(output_format or '').strip().lower()
+
+  if normalized.startswith('wav_') or normalized.startswith('pcm_'):
+    return 'audio/wav'
+
+  if normalized.startswith('ulaw_'):
+    return 'audio/basic'
+
+  return 'audio/mpeg'
+
+
+def _generate_elevenlabs_tts_bytes(text: str) -> tuple[bytes, str]:
+  settings = get_settings()
+  api_key = settings.elevenlabs_api_key.strip()
+
+  if not api_key:
+    raise ApiError(
+      'ElevenLabs API key is not configured. Set CAPERCLUB_ELEVENLABS_API_KEY.',
+      503,
+    )
+
+  voice_id = settings.elevenlabs_voice_id.strip() or DEFAULT_VOICE_ID
+  model_id = settings.elevenlabs_model_id.strip() or ELEVENLABS_MODEL_ID
+  output_format = settings.elevenlabs_output_format.strip() or 'mp3_44100_128'
+  query = urlencode({'output_format': output_format})
+  url = f'https://api.elevenlabs.io/v1/text-to-speech/{quote(voice_id, safe="")}?{query}'
+  payload = json.dumps({
+    'text': text,
+    'model_id': model_id,
+  }).encode('utf-8')
+  request = Request(
+    url,
+    data=payload,
+    headers={
+      'Accept': _audio_mime_type(output_format),
+      'Content-Type': 'application/json',
+      'xi-api-key': api_key,
+    },
+    method='POST',
+  )
+
+  try:
+    with urlopen(request, timeout=30) as response:
+      audio_bytes = response.read()
+
+    if not audio_bytes:
+      raise ApiError('ElevenLabs returned an empty audio response.', 502)
+
+    return audio_bytes, _audio_mime_type(output_format)
+  except urllib_error.HTTPError as error:
+    detail = error.read().decode('utf-8', errors='ignore').strip()
+    message = detail or f'ElevenLabs request failed with HTTP {error.code}.'
+    raise ApiError(message, 502) from error
+  except urllib_error.URLError as error:
+    raise ApiError('Unable to reach ElevenLabs from the backend server.', 502) from error
+
+
+def generate_tts(text: str) -> tuple[bytes, str]:
+  normalized = ' '.join(str(text or '').split())
+
+  if not normalized:
+    raise ApiError('Text is required.', 400)
+
+  return _generate_elevenlabs_tts_bytes(normalized)

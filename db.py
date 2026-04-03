@@ -69,6 +69,25 @@ class Settings(BaseSettings):
   cors_origin_regex: str = (
     r'^https?://((localhost|127\.0\.0\.1)(:\d+)?|[a-z0-9-]+\.trycloudflare\.com)$'
   )
+  elevenlabs_api_key: str = Field(
+    default='',
+    validation_alias=AliasChoices('CAPERCLUB_ELEVENLABS_API_KEY', 'ELEVENLABS_API_KEY'),
+  )
+  elevenlabs_voice_id: str = Field(
+    default='pNInz6obpgDQGcFmaJgB',
+    validation_alias=AliasChoices('CAPERCLUB_ELEVENLABS_VOICE_ID', 'ELEVENLABS_VOICE_ID'),
+  )
+  elevenlabs_model_id: str = Field(
+    default='eleven_multilingual_v2',
+    validation_alias=AliasChoices('CAPERCLUB_ELEVENLABS_MODEL_ID', 'ELEVENLABS_MODEL_ID'),
+  )
+  elevenlabs_output_format: str = Field(
+    default='mp3_44100_128',
+    validation_alias=AliasChoices(
+      'CAPERCLUB_ELEVENLABS_OUTPUT_FORMAT',
+      'ELEVENLABS_OUTPUT_FORMAT',
+    ),
+  )
 
   model_config = SettingsConfigDict(
     env_prefix='CAPERCLUB_',

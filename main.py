@@ -7,7 +7,7 @@ import jwt
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
@@ -27,6 +27,7 @@ if __package__:
     RegisterInput,
     SessionEndInput,
     SessionStartInput,
+    TTSRequest,
     UpdateSlotInput,
     UpdateUserInput,
   )
@@ -42,6 +43,7 @@ if __package__:
     delete_slot,
     delete_user,
     end_session,
+    generate_tts,
     get_admin_announcements,
     get_admin_dashboard,
     get_admin_reports,
@@ -79,6 +81,7 @@ else:
     RegisterInput,
     SessionEndInput,
     SessionStartInput,
+    TTSRequest,
     UpdateSlotInput,
     UpdateUserInput,
   )
@@ -93,6 +96,7 @@ else:
     delete_slot,
     delete_user,
     end_session,
+    generate_tts,
     get_admin_announcements,
     get_admin_dashboard,
     get_admin_reports,
@@ -454,13 +458,21 @@ def session_start(
 
 
 @app.post('/tts')
-def tts_generate() -> dict:
-  raise ApiError('Server-side TTS is disabled. Use the browser Web Speech API.', 410)
+def tts_generate(
+  input_data: TTSRequest,
+  _: User = Depends(get_current_admin),
+) -> Response:
+  audio_bytes, media_type = generate_tts(input_data.text)
+  return Response(content=audio_bytes, media_type=media_type)
 
 
 @app.post('/api/tts')
-def tts_generate_legacy() -> dict:
-  raise ApiError('Server-side TTS is disabled. Use the browser Web Speech API.', 410)
+def tts_generate_legacy(
+  input_data: TTSRequest,
+  _: User = Depends(get_current_admin),
+) -> Response:
+  audio_bytes, media_type = generate_tts(input_data.text)
+  return Response(content=audio_bytes, media_type=media_type)
 
 
 @app.get('/admin/session/timer/{session_id}')
