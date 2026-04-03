@@ -86,7 +86,7 @@ class RegisterInput(StrictModel):
 
 class CreateUserInput(StrictModel):
   name: str = Field(min_length=2, max_length=120)
-  memberId: str = Field(min_length=2, max_length=64)
+  memberId: str | None = Field(default=None, max_length=64)
   email: str
   password: str = Field(min_length=8, max_length=128)
   mobileNumber: str | None = Field(default=None, max_length=15)

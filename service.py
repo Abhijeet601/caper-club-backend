@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import os
+import re
 import subprocess
 import tempfile
 from collections import Counter, deque
@@ -148,6 +149,28 @@ def _normalize_member_id(value: str | None, fallback: str) -> str:
   normalized = '-'.join(part for part in normalized.split('-') if part)
 
   return normalized or fallback
+
+
+def _member_id_prefix(role: UserRole | str) -> str:
+  normalized_role = role.value if isinstance(role, UserRole) else str(role).strip().lower()
+  return 'ADMIN' if normalized_role == 'admin' else 'CSC'
+
+
+def _generate_member_id(db: Session, role: UserRole | str) -> str:
+  prefix = _member_id_prefix(role)
+  width = 4 if prefix == 'ADMIN' else 3
+  pattern = re.compile(rf'^{re.escape(prefix)}-(\d+)$')
+  existing_ids = db.scalars(
+    select(User.member_id).where(User.member_id.like(f'{prefix}-%'))
+  ).all()
+
+  highest = 0
+  for member_id in existing_ids:
+    match = pattern.match(str(member_id or '').strip().upper())
+    if match:
+      highest = max(highest, int(match.group(1)))
+
+  return f'{prefix}-{highest + 1:0{width}d}'
 
 
 def _legacy_member_metadata(user: User) -> dict[str, Any]:
@@ -518,8 +541,12 @@ def _serialize_timeline(item: UserTimeline) -> dict[str, Any]:
 
 
 def _serialize_payment(item: PaymentHistory) -> dict[str, Any]:
+  user = getattr(item, 'user', None)
   return {
     'id': item.id,
+    'userId': item.user_id,
+    'userName': user.name if user else None,
+    'memberId': _resolve_member_id(user) if user else None,
     'plan': item.plan,
     'amount': float(item.amount),
     'paymentMode': item.payment_mode,
@@ -1340,6 +1367,11 @@ def _reports_payload(db: Session) -> dict[str, Any]:
     .options(selectinload(User.sessions), selectinload(User.timelines))
     .order_by(User.updated_at.desc())
   ).all()
+  payments = db.scalars(
+    select(PaymentHistory)
+    .options(selectinload(PaymentHistory.user))
+    .order_by(PaymentHistory.created_at.desc())
+  ).all()
   defaulters = [
     {
       'id': user.id,
@@ -1374,6 +1406,7 @@ def _reports_payload(db: Session) -> dict[str, Any]:
     'attendanceBars': attendance_bars,
     'peakHours': peak_hours,
     'entryLogs': entry_logs,
+    'payments': [_serialize_payment(item) for item in payments],
     'defaulters': defaulters,
     'recentActivity': recent_activity,
   }
@@ -1670,9 +1703,15 @@ def create_user(db: Session, input_data: CreateUserInput) -> dict[str, Any]:
   if _get_user_by_email(db, input_data.email):
     raise ApiError('User with this email already exists.', 409)
 
-  member_id = _normalize_member_id(input_data.memberId, 'CC-MEMBER')
-  if _get_user_by_member_id(db, member_id):
-    raise ApiError('User with this member ID already exists.', 409)
+  role = UserRole(input_data.role)
+  if input_data.memberId:
+    member_id = _normalize_member_id(input_data.memberId, _generate_member_id(db, role))
+    if _get_user_by_member_id(db, member_id):
+      raise ApiError('User with this member ID already exists.', 409)
+  else:
+    member_id = _generate_member_id(db, role)
+    while _get_user_by_member_id(db, member_id):
+      member_id = _generate_member_id(db, role)
 
   if input_data.mobileNumber and _get_user_by_mobile_number(db, input_data.mobileNumber):
     raise ApiError('User with this mobile number already exists.', 409)
@@ -1683,7 +1722,7 @@ def create_user(db: Session, input_data: CreateUserInput) -> dict[str, Any]:
     email=input_data.email,
     mobile_number=input_data.mobileNumber,
     password_hash=hash_password(input_data.password),
-    role=UserRole(input_data.role),
+    role=role,
     member_id=member_id,
     slot=slot,
     membership_plan=input_data.membershipPlan,
