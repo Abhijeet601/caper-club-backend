@@ -286,6 +286,9 @@ def _action_cooldown_remaining_seconds(
   *,
   now: datetime | None = None,
 ) -> int:
+  if _serialize_attendance_action(getattr(user, 'last_action', None)) != 'OUT':
+    return 0
+
   last_action_at = getattr(user, 'last_action_at', None)
   if last_action_at is None:
     return 0
@@ -2068,39 +2071,6 @@ def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
       frames_captured=1,
     )
 
-  if today_session is not None and today_session.ended_at is not None:
-    return _build_scan_response(
-      status='duplicate',
-      message='Attendance already marked.',
-      confidence=confidence,
-      name=user.name,
-      duplicate_warning=True,
-      tts_message='Attendance already recorded.',
-      attendance_action=action.lower(),
-      session=_serialize_session(today_session),
-      cooldown_remaining_seconds=0,
-      face_box=None,
-      area=area,
-      frames_captured=1,
-    )
-
-  cooldown_remaining = _action_cooldown_remaining_seconds(user, now=attendance_time)
-  if cooldown_remaining > 0:
-    return _build_scan_response(
-      status='cooldown',
-      message=f'Please wait {_format_wait_time(cooldown_remaining)} before next action.',
-      confidence=confidence,
-      name=user.name,
-      duplicate_warning=True,
-      tts_message='Please wait before marking again.',
-      attendance_action=None,
-      session=_serialize_session(active_session) if active_session else None,
-      cooldown_remaining_seconds=cooldown_remaining,
-      face_box=None,
-      area=area,
-      frames_captured=1,
-    )
-
   if active_session is not None:
     if action == 'IN':
       return _build_scan_response(
@@ -2149,6 +2119,22 @@ def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
       frames_captured=1,
     )
 
+  if today_session is not None and today_session.ended_at is not None:
+    return _build_scan_response(
+      status='duplicate',
+      message='Exit already marked.' if action == 'OUT' else 'Attendance already marked.',
+      confidence=confidence,
+      name=user.name,
+      duplicate_warning=True,
+      tts_message='Exit already recorded.' if action == 'OUT' else 'Attendance already recorded.',
+      attendance_action=action.lower(),
+      session=_serialize_session(today_session),
+      cooldown_remaining_seconds=0,
+      face_box=None,
+      area=area,
+      frames_captured=1,
+    )
+
   if action == 'OUT':
     return _build_scan_response(
       status='duplicate',
@@ -2160,6 +2146,23 @@ def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
       attendance_action='out',
       session=None,
       cooldown_remaining_seconds=0,
+      face_box=None,
+      area=area,
+      frames_captured=1,
+    )
+
+  cooldown_remaining = _action_cooldown_remaining_seconds(user, now=attendance_time)
+  if cooldown_remaining > 0:
+    return _build_scan_response(
+      status='cooldown',
+      message=f'Please wait {_format_wait_time(cooldown_remaining)} before next action.',
+      confidence=confidence,
+      name=user.name,
+      duplicate_warning=True,
+      tts_message='Please wait before marking again.',
+      attendance_action=None,
+      session=None,
+      cooldown_remaining_seconds=cooldown_remaining,
       face_box=None,
       area=area,
       frames_captured=1,
