@@ -110,6 +110,7 @@ FACE_MATCH_THRESHOLD = 0.47
 FACE_RETRY_THRESHOLD = 0.58
 COOLDOWN_SECONDS = 300
 ENTRY_DUPLICATE_SECONDS = 30
+MIN_EXIT_SECONDS = 300
 SESSION_LIMIT_MINUTES = 70
 SESSION_WARNING_MINUTES = 5
 CLUB_TIMEZONE = ZoneInfo('Asia/Kolkata')
@@ -470,6 +471,16 @@ def _slot_gate_message(slot: TimeSlot | None) -> tuple[bool, str, str]:
 def _session_duration_minutes(session: SessionRecord) -> int:
   end_time = session.ended_at or utcnow()
   return max(0, int((end_time - session.started_at).total_seconds() // 60))
+
+
+def _session_elapsed_seconds(session: SessionRecord, now: datetime | None = None) -> int:
+  reference_time = now or utcnow()
+  return max(0, int((reference_time - session.started_at).total_seconds()))
+
+
+def _exit_lock_remaining_seconds(session: SessionRecord, now: datetime | None = None) -> int:
+  elapsed = _session_elapsed_seconds(session, now)
+  return max(0, MIN_EXIT_SECONDS - elapsed)
 
 
 def _session_deadline(session: SessionRecord) -> datetime:
@@ -2088,6 +2099,23 @@ def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
         frames_captured=1,
       )
 
+    exit_lock_remaining = _exit_lock_remaining_seconds(active_session, attendance_time)
+    if exit_lock_remaining > 0:
+      return _build_scan_response(
+        status='cooldown',
+        message=f'Please wait {_format_wait_time(exit_lock_remaining)} before exit.',
+        confidence=confidence,
+        name=user.name,
+        duplicate_warning=True,
+        tts_message='Please wait before exit.',
+        attendance_action='out',
+        session=_serialize_session(active_session),
+        cooldown_remaining_seconds=exit_lock_remaining,
+        face_box=None,
+        area=area,
+        frames_captured=1,
+      )
+
     active_session.ended_at = attendance_time
     active_session.status = SessionStatus.ENDED
     duration_minutes = _session_duration_minutes(active_session)
@@ -2449,6 +2477,10 @@ def end_session(db: Session, input_data: SessionEndInput) -> dict[str, Any]:
     raise ApiError('Session is not active.', 400)
 
   ended_at = utcnow()
+  exit_lock_remaining = _exit_lock_remaining_seconds(session, ended_at)
+  if exit_lock_remaining > 0:
+    raise ApiError(f'Please wait {_format_wait_time(exit_lock_remaining)} before exit.', 400)
+
   session.status = SessionStatus.ENDED
   session.ended_at = ended_at
   session.user.last_action = 'OUT'
