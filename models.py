@@ -71,7 +71,6 @@ class User(Base):
   role: Mapped[UserRole] = mapped_column(SqlEnum(UserRole))
   mobile_number: Mapped[str | None] = mapped_column(
     String(15),
-    unique=True,
     index=True,
     nullable=True,
   )
@@ -80,10 +79,13 @@ class User(Base):
     ForeignKey('time_slots.id', ondelete='SET NULL'),
     nullable=True,
   )
+  sport: Mapped[str] = mapped_column(String(64), default='General')
   membership_plan: Mapped[str] = mapped_column(String(32), default='Monthly')
+  membership_level: Mapped[str] = mapped_column(String(120), default='')
   membership_start: Mapped[date | None] = mapped_column(Date, nullable=True)
   membership_expiry: Mapped[date | None] = mapped_column(Date, nullable=True)
   payment_amount: Mapped[float] = mapped_column(Numeric(10, 2), default=0)
+  due_amount: Mapped[float] = mapped_column(Numeric(10, 2), default=0)
   payment_mode: Mapped[str] = mapped_column(String(16), default='UPI')
   payment_status: Mapped[str] = mapped_column(String(16), default='Pending')
   last_action: Mapped[str | None] = mapped_column(String(8), nullable=True)

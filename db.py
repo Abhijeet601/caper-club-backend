@@ -182,10 +182,13 @@ EXPECTED_TABLE_COLUMNS = {
     'role',
     'mobile_number',
     'member_id',
+    'sport',
+    'membership_level',
     'membership_plan',
     'membership_start',
     'membership_expiry',
     'payment_amount',
+    'due_amount',
     'payment_mode',
     'payment_status',
     'last_action',
@@ -266,7 +269,10 @@ MIGRATABLE_MISSING_COLUMNS = {
   'users': {
     'member_id',
     'mobile_number',
+    'sport',
+    'membership_level',
     'payment_amount',
+    'due_amount',
     'payment_mode',
     'payment_status',
     'last_action',
@@ -432,6 +438,21 @@ def _ensure_index_exists(
     connection.execute(text(create_sql))
 
 
+def _drop_index_if_exists(
+  inspector,
+  *,
+  table_name: str,
+  index_name: str,
+) -> None:
+  indexes = {index['name'] for index in inspector.get_indexes(table_name)}
+
+  if index_name not in indexes:
+    return
+
+  with engine.begin() as connection:
+    connection.execute(text(f'ALTER TABLE `{table_name}` DROP INDEX `{index_name}`'))
+
+
 def _ensure_foreign_key_exists(
   inspector,
   *,
@@ -557,6 +578,22 @@ def _ensure_member_profile_schema() -> None:
         )
       )
 
+    if 'sport' not in user_columns:
+      connection.execute(
+        text(
+          'ALTER TABLE `users` '
+          "ADD COLUMN `sport` VARCHAR(64) NOT NULL DEFAULT 'General' AFTER `slot_id`"
+        )
+      )
+
+    if 'membership_level' not in user_columns:
+      connection.execute(
+        text(
+          'ALTER TABLE `users` '
+          "ADD COLUMN `membership_level` VARCHAR(120) NOT NULL DEFAULT '' AFTER `membership_plan`"
+        )
+      )
+
     if 'payment_amount' not in user_columns:
       connection.execute(
         text(
@@ -565,11 +602,19 @@ def _ensure_member_profile_schema() -> None:
         )
       )
 
+    if 'due_amount' not in user_columns:
+      connection.execute(
+        text(
+          'ALTER TABLE `users` '
+          'ADD COLUMN `due_amount` DECIMAL(10, 2) NOT NULL DEFAULT 0 AFTER `payment_amount`'
+        )
+      )
+
     if 'payment_mode' not in user_columns:
       connection.execute(
         text(
           'ALTER TABLE `users` '
-          "ADD COLUMN `payment_mode` VARCHAR(16) NOT NULL DEFAULT 'UPI' AFTER `payment_amount`"
+          "ADD COLUMN `payment_mode` VARCHAR(16) NOT NULL DEFAULT 'UPI' AFTER `due_amount`"
         )
       )
 
@@ -639,11 +684,26 @@ def _ensure_member_profile_schema() -> None:
         )
 
   inspector = inspect(engine)
+  indexes = inspector.get_indexes('users')
+  unique_mobile_indexes = [
+    index['name']
+    for index in indexes
+    if index.get('unique') and index.get('column_names') == ['mobile_number']
+  ]
+
+  for index_name in unique_mobile_indexes:
+    _drop_index_if_exists(
+      inspector,
+      table_name='users',
+      index_name=index_name,
+    )
+
+  inspector = inspect(engine)
   _ensure_index_exists(
     inspector,
     table_name='users',
     index_name='ix_users_mobile_number',
-    create_sql='CREATE UNIQUE INDEX `ix_users_mobile_number` ON `users` (`mobile_number`)',
+    create_sql='CREATE INDEX `ix_users_mobile_number` ON `users` (`mobile_number`)',
   )
   _ensure_index_exists(
     inspector,

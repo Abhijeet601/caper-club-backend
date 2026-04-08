@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 RoleLiteral = Literal['admin', 'user']
-PlanLiteral = Literal['Monthly', 'Quarterly', 'Yearly', 'Custom']
+PlanLiteral = Literal['Monthly', '2 Month', 'Quarterly', 'Half-Yearly', 'Yearly', 'Custom']
 ToneLiteral = Literal['blue', 'purple', 'green', 'red', 'amber']
 PaymentModeLiteral = Literal['Cash', 'UPI', 'Card']
 PaymentStatusLiteral = Literal['Paid', 'Pending', 'Expired']
@@ -87,6 +87,8 @@ class RegisterInput(StrictModel):
 class CreateUserInput(StrictModel):
   name: str = Field(min_length=2, max_length=120)
   memberId: str | None = Field(default=None, max_length=64)
+  sport: str = Field(default='General', max_length=64)
+  membershipLevel: str = Field(default='', max_length=120)
   email: str
   password: str = Field(min_length=8, max_length=128)
   mobileNumber: str | None = Field(default=None, max_length=15)
@@ -96,11 +98,21 @@ class CreateUserInput(StrictModel):
   membershipStart: date
   membershipExpiry: date
   paymentAmount: float = Field(default=0, ge=0)
+  dueAmount: float = Field(default=0, ge=0)
   paymentMode: PaymentModeLiteral = 'UPI'
   paymentStatus: PaymentStatusLiteral = 'Pending'
   note: str = Field(default='', max_length=500)
 
-  @field_validator('name', 'memberId', 'note', 'slotId', 'mobileNumber', mode='before')
+  @field_validator(
+    'name',
+    'memberId',
+    'sport',
+    'membershipLevel',
+    'note',
+    'slotId',
+    'mobileNumber',
+    mode='before',
+  )
   @classmethod
   def strip_text(cls, value: object) -> object:
     return _normalize_text(value)
@@ -129,6 +141,8 @@ class CreateUserInput(StrictModel):
 class UpdateUserInput(StrictModel):
   name: str = Field(min_length=2, max_length=120)
   memberId: str = Field(min_length=2, max_length=64)
+  sport: str = Field(default='General', max_length=64)
+  membershipLevel: str = Field(default='', max_length=120)
   email: str
   mobileNumber: str | None = Field(default=None, max_length=15)
   role: RoleLiteral
@@ -137,12 +151,23 @@ class UpdateUserInput(StrictModel):
   membershipStart: date
   membershipExpiry: date
   paymentAmount: float = Field(default=0, ge=0)
+  dueAmount: float = Field(default=0, ge=0)
   paymentMode: PaymentModeLiteral = 'UPI'
   paymentStatus: PaymentStatusLiteral = 'Pending'
   note: str = Field(default='', max_length=500)
   password: str | None = Field(default=None, min_length=8, max_length=128)
 
-  @field_validator('name', 'memberId', 'note', 'password', 'slotId', 'mobileNumber', mode='before')
+  @field_validator(
+    'name',
+    'memberId',
+    'sport',
+    'membershipLevel',
+    'note',
+    'password',
+    'slotId',
+    'mobileNumber',
+    mode='before',
+  )
   @classmethod
   def strip_text(cls, value: object) -> object:
     return _normalize_text(value)

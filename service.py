@@ -243,6 +243,18 @@ def _resolve_payment_status(user: User) -> str:
   return legacy_value if legacy_value in {'Paid', 'Pending', 'Expired'} else 'Pending'
 
 
+def _resolve_sport(user: User) -> str:
+  return (user.sport or '').strip() or 'General'
+
+
+def _resolve_membership_level(user: User) -> str:
+  return (user.membership_level or '').strip()
+
+
+def _resolve_due_amount(user: User) -> float:
+  return max(0.0, float(user.due_amount or 0))
+
+
 def _resolve_admin_note(user: User) -> str:
   parsed = _legacy_member_metadata(user)
 
@@ -616,9 +628,12 @@ def _serialize_auth_user(user: User) -> dict[str, Any]:
     'mobile_number': user.mobile_number,
     'role': user.role.value,
     'membershipPlan': user.membership_plan,
+    'sport': _resolve_sport(user),
+    'membershipLevel': _resolve_membership_level(user),
     'membershipStatus': _membership_status(user),
     'membershipExpiry': _serialize_date(user.membership_expiry),
     'paymentAmount': _resolve_payment_amount(user),
+    'dueAmount': _resolve_due_amount(user),
     'paymentMode': _resolve_payment_mode(user),
     'paymentStatus': _resolve_payment_status(user),
     'faceImageUrl': _first_face_asset_url(user),
@@ -655,11 +670,14 @@ def _serialize_user(user: User) -> dict[str, Any]:
     'slotStartTime': _serialize_time(user.slot.start_time) if user.slot else None,
     'slotEndTime': _serialize_time(user.slot.end_time) if user.slot else None,
     'slot': _serialize_slot(user.slot),
+    'sport': _resolve_sport(user),
+    'membershipLevel': _resolve_membership_level(user),
     'membershipPlan': user.membership_plan,
     'membershipStatus': _membership_status(user),
     'membershipStart': _serialize_date(user.membership_start),
     'membershipExpiry': _serialize_date(user.membership_expiry),
     'paymentAmount': _resolve_payment_amount(user),
+    'dueAmount': _resolve_due_amount(user),
     'paymentMode': _resolve_payment_mode(user),
     'paymentStatus': _resolve_payment_status(user),
     'faceImageUrl': _first_face_asset_url(user),
@@ -1386,16 +1404,36 @@ def _reports_payload(db: Session) -> dict[str, Any]:
     .options(selectinload(PaymentHistory.user))
     .order_by(PaymentHistory.created_at.desc())
   ).all()
-  defaulters = [
-    {
-      'id': user.id,
-      'name': user.name,
-      'issue': 'Membership expired' if _membership_status(user) == 'expired' else 'Expiring soon',
-      'detail': f"{user.membership_plan} plan ends on {_serialize_date(user.membership_expiry)}",
-    }
-    for user in users
-    if _membership_status(user) != 'active'
-  ][:6]
+  defaulters: list[dict[str, Any]] = []
+  for user in users:
+    if user.role != UserRole.USER:
+      continue
+
+    due_amount = _resolve_due_amount(user)
+    membership_status = _membership_status(user)
+
+    if due_amount > 0:
+      defaulters.append(
+        {
+          'id': user.id,
+          'name': user.name,
+          'issue': 'Due amount',
+          'detail': f'Outstanding due: Rs. {due_amount:,.2f}',
+        }
+      )
+      continue
+
+    if membership_status != 'active':
+      defaulters.append(
+        {
+          'id': user.id,
+          'name': user.name,
+          'issue': 'Membership expired' if membership_status == 'expired' else 'Expiring soon',
+          'detail': f"{user.membership_plan} plan ends on {_serialize_date(user.membership_expiry)}",
+        }
+      )
+
+  defaulters = defaulters[:6]
 
   if RECENT_SCAN_EVENTS:
     recent_activity = [
@@ -1727,9 +1765,6 @@ def create_user(db: Session, input_data: CreateUserInput) -> dict[str, Any]:
     while _get_user_by_member_id(db, member_id):
       member_id = _generate_member_id(db, role)
 
-  if input_data.mobileNumber and _get_user_by_mobile_number(db, input_data.mobileNumber):
-    raise ApiError('User with this mobile number already exists.', 409)
-
   slot = _get_slot_by_id(db, input_data.slotId) if input_data.slotId else None
   user = User(
     name=input_data.name,
@@ -1739,10 +1774,13 @@ def create_user(db: Session, input_data: CreateUserInput) -> dict[str, Any]:
     role=role,
     member_id=member_id,
     slot=slot,
+    sport=input_data.sport or 'General',
     membership_plan=input_data.membershipPlan,
+    membership_level=input_data.membershipLevel or '',
     membership_start=input_data.membershipStart,
     membership_expiry=input_data.membershipExpiry,
     payment_amount=input_data.paymentAmount,
+    due_amount=input_data.dueAmount,
     payment_mode=input_data.paymentMode,
     payment_status=input_data.paymentStatus,
     face_images_count=0,
@@ -1794,6 +1832,7 @@ def create_membership(db: Session, input_data: CreateMembershipInput) -> dict[st
   user.membership_start = input_data.startDate
   user.membership_expiry = input_data.expiryDate
   user.payment_amount = input_data.paymentAmount
+  user.due_amount = 0 if input_data.paymentStatus == 'Paid' else input_data.paymentAmount
   user.payment_mode = input_data.paymentMode
   user.payment_status = input_data.paymentStatus
   user.updated_at = utcnow()
@@ -1832,7 +1871,6 @@ def update_user(db: Session, user_id: str, input_data: UpdateUserInput) -> dict[
   existing = _get_user_by_email(db, input_data.email)
   member_id = _normalize_member_id(input_data.memberId, _default_member_id(user))
   existing_member = _get_user_by_member_id(db, member_id)
-  existing_mobile = _get_user_by_mobile_number(db, input_data.mobileNumber)
   slot = _get_slot_by_id(db, input_data.slotId) if input_data.slotId else None
 
   if existing is not None and existing.id != user.id:
@@ -1840,9 +1878,6 @@ def update_user(db: Session, user_id: str, input_data: UpdateUserInput) -> dict[
 
   if existing_member is not None and existing_member.id != user.id:
     raise ApiError('Another user already uses this member ID.', 409)
-
-  if existing_mobile is not None and existing_mobile.id != user.id:
-    raise ApiError('Another user already uses this mobile number.', 409)
 
   membership_changed = any(
     (
@@ -1861,10 +1896,13 @@ def update_user(db: Session, user_id: str, input_data: UpdateUserInput) -> dict[
   user.role = UserRole(input_data.role)
   user.member_id = member_id
   user.slot = slot
+  user.sport = input_data.sport or 'General'
   user.membership_plan = input_data.membershipPlan
+  user.membership_level = input_data.membershipLevel or ''
   user.membership_start = input_data.membershipStart
   user.membership_expiry = input_data.membershipExpiry
   user.payment_amount = input_data.paymentAmount
+  user.due_amount = input_data.dueAmount
   user.payment_mode = input_data.paymentMode
   user.payment_status = input_data.paymentStatus
   user.note = input_data.note
