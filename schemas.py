@@ -97,6 +97,7 @@ class CreateUserInput(StrictModel):
   membershipPlan: PlanLiteral = 'Monthly'
   membershipStart: date
   membershipExpiry: date
+  visitLimit: int | None = Field(default=None, ge=0)
   paymentAmount: float = Field(default=0, ge=0)
   dueAmount: float = Field(default=0, ge=0)
   paymentMode: PaymentModeLiteral = 'UPI'
@@ -150,6 +151,7 @@ class UpdateUserInput(StrictModel):
   membershipPlan: PlanLiteral = 'Monthly'
   membershipStart: date
   membershipExpiry: date
+  visitLimit: int | None = Field(default=None, ge=0)
   paymentAmount: float = Field(default=0, ge=0)
   dueAmount: float = Field(default=0, ge=0)
   paymentMode: PaymentModeLiteral = 'UPI'
@@ -248,6 +250,7 @@ class CreateMembershipInput(StrictModel):
   plan: PlanLiteral
   startDate: date
   expiryDate: date
+  visitLimit: int | None = Field(default=None, ge=0)
   paymentAmount: float = Field(default=0, ge=0)
   paymentMode: PaymentModeLiteral = 'UPI'
   paymentStatus: PaymentStatusLiteral = 'Pending'

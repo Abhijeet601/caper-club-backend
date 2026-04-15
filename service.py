@@ -113,6 +113,13 @@ ENTRY_DUPLICATE_SECONDS = 30
 MIN_EXIT_SECONDS = 300
 SESSION_LIMIT_MINUTES = 70
 SESSION_WARNING_MINUTES = 5
+MEMBERSHIP_VISIT_LIMITS = {
+  'Monthly': 30,
+  '2 Month': 60,
+  'Quarterly': 90,
+  'Half-Yearly': 180,
+  'Yearly': 365,
+}
 CLUB_TIMEZONE = ZoneInfo('Asia/Kolkata')
 RECENT_SCAN_EVENTS: deque[dict[str, Any]] = deque(maxlen=12)
 ELEVENLABS_MODEL_ID = 'eleven_multilingual_v2'
@@ -356,6 +363,52 @@ def _days_left(user: User) -> int:
     return 0
 
   return max(0, (user.membership_expiry - _club_today()).days)
+
+
+def _membership_visit_limit(user: User) -> int:
+  override_value = getattr(user, 'visit_limit', None)
+  if override_value is not None:
+    return max(0, int(override_value))
+
+  configured_limit = MEMBERSHIP_VISIT_LIMITS.get(str(user.membership_plan or '').strip())
+  if configured_limit is not None:
+    return configured_limit
+
+  if user.membership_start and user.membership_expiry:
+    return max(0, (user.membership_expiry - user.membership_start).days)
+
+  return 0
+
+
+def _membership_visit_stats(user: User) -> dict[str, int]:
+  entry_timelines = [
+    timeline for timeline in user.timelines if timeline.event_type == TimelineEventType.ENTRY
+  ]
+  membership_start = user.membership_start
+  membership_expiry = user.membership_expiry
+
+  membership_visits_used = 0
+  for timeline in entry_timelines:
+    occurred_at = getattr(timeline, 'occurred_at', None)
+    if occurred_at is None:
+      continue
+
+    local_date = _utc_to_local(occurred_at).date()
+    if membership_start and local_date < membership_start:
+      continue
+    if membership_expiry and local_date > membership_expiry:
+      continue
+    membership_visits_used += 1
+
+  membership_visits_allowed = _membership_visit_limit(user)
+  membership_visits_remaining = max(0, membership_visits_allowed - membership_visits_used)
+
+  return {
+    'totalVisits': len(entry_timelines),
+    'membershipVisitsAllowed': membership_visits_allowed,
+    'membershipVisitsUsed': membership_visits_used,
+    'membershipVisitsRemaining': membership_visits_remaining,
+  }
 
 
 def _slot_window_for_local_date(slot: TimeSlot, target_date: date) -> tuple[datetime, datetime]:
@@ -632,6 +685,7 @@ def _serialize_auth_user(user: User) -> dict[str, Any]:
     'membershipLevel': _resolve_membership_level(user),
     'membershipStatus': _membership_status(user),
     'membershipExpiry': _serialize_date(user.membership_expiry),
+    'visitLimit': user.visit_limit,
     'paymentAmount': _resolve_payment_amount(user),
     'dueAmount': _resolve_due_amount(user),
     'paymentMode': _resolve_payment_mode(user),
@@ -650,9 +704,7 @@ def _serialize_auth_user(user: User) -> dict[str, Any]:
 
 
 def _serialize_user(user: User) -> dict[str, Any]:
-  visits = len(
-    [timeline for timeline in user.timelines if timeline.event_type == TimelineEventType.ENTRY]
-  )
+  visit_stats = _membership_visit_stats(user)
   latest_session = max(user.sessions, key=lambda item: item.started_at, default=None)
   last_action = _serialize_attendance_action(user.last_action)
   last_action_at = _serialize_datetime(user.last_action_at)
@@ -676,6 +728,7 @@ def _serialize_user(user: User) -> dict[str, Any]:
     'membershipStatus': _membership_status(user),
     'membershipStart': _serialize_date(user.membership_start),
     'membershipExpiry': _serialize_date(user.membership_expiry),
+    'visitLimit': user.visit_limit,
     'paymentAmount': _resolve_payment_amount(user),
     'dueAmount': _resolve_due_amount(user),
     'paymentMode': _resolve_payment_mode(user),
@@ -697,7 +750,10 @@ def _serialize_user(user: User) -> dict[str, Any]:
     'status': _membership_status(user),
     'imageCount': user.face_images_count,
     'hue': _deterministic_hue(user.id),
-    'visits': visits,
+    'visits': visit_stats['totalVisits'],
+    'membershipVisitsAllowed': visit_stats['membershipVisitsAllowed'],
+    'membershipVisitsUsed': visit_stats['membershipVisitsUsed'],
+    'membershipVisitsRemaining': visit_stats['membershipVisitsRemaining'],
     'confidence': round(float(latest_session.confidence), 2) if latest_session else 0,
   }
 
@@ -1779,6 +1835,7 @@ def create_user(db: Session, input_data: CreateUserInput) -> dict[str, Any]:
     membership_level=input_data.membershipLevel or '',
     membership_start=input_data.membershipStart,
     membership_expiry=input_data.membershipExpiry,
+    visit_limit=input_data.visitLimit,
     payment_amount=input_data.paymentAmount,
     due_amount=input_data.dueAmount,
     payment_mode=input_data.paymentMode,
@@ -1831,6 +1888,7 @@ def create_membership(db: Session, input_data: CreateMembershipInput) -> dict[st
   user.membership_plan = input_data.plan
   user.membership_start = input_data.startDate
   user.membership_expiry = input_data.expiryDate
+  user.visit_limit = input_data.visitLimit
   user.payment_amount = input_data.paymentAmount
   user.due_amount = 0 if input_data.paymentStatus == 'Paid' else input_data.paymentAmount
   user.payment_mode = input_data.paymentMode
@@ -1901,6 +1959,7 @@ def update_user(db: Session, user_id: str, input_data: UpdateUserInput) -> dict[
   user.membership_level = input_data.membershipLevel or ''
   user.membership_start = input_data.membershipStart
   user.membership_expiry = input_data.membershipExpiry
+  user.visit_limit = input_data.visitLimit
   user.payment_amount = input_data.paymentAmount
   user.due_amount = input_data.dueAmount
   user.payment_mode = input_data.paymentMode

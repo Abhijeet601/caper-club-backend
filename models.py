@@ -84,6 +84,7 @@ class User(Base):
   membership_level: Mapped[str] = mapped_column(String(120), default='')
   membership_start: Mapped[date | None] = mapped_column(Date, nullable=True)
   membership_expiry: Mapped[date | None] = mapped_column(Date, nullable=True)
+  visit_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
   payment_amount: Mapped[float] = mapped_column(Numeric(10, 2), default=0)
   due_amount: Mapped[float] = mapped_column(Numeric(10, 2), default=0)
   payment_mode: Mapped[str] = mapped_column(String(16), default='UPI')

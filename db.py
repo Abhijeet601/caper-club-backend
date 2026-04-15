@@ -187,6 +187,7 @@ EXPECTED_TABLE_COLUMNS = {
     'membership_plan',
     'membership_start',
     'membership_expiry',
+    'visit_limit',
     'payment_amount',
     'due_amount',
     'payment_mode',
@@ -271,6 +272,7 @@ MIGRATABLE_MISSING_COLUMNS = {
     'mobile_number',
     'sport',
     'membership_level',
+    'visit_limit',
     'payment_amount',
     'due_amount',
     'payment_mode',
@@ -599,6 +601,14 @@ def _ensure_member_profile_schema() -> None:
         text(
           'ALTER TABLE `users` '
           'ADD COLUMN `payment_amount` DECIMAL(10, 2) NOT NULL DEFAULT 0 AFTER `membership_expiry`'
+        )
+      )
+
+    if 'visit_limit' not in user_columns:
+      connection.execute(
+        text(
+          'ALTER TABLE `users` '
+          'ADD COLUMN `visit_limit` INT NULL AFTER `membership_expiry`'
         )
       )
 

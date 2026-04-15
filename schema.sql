@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS users (
     membership_level VARCHAR(120) NOT NULL DEFAULT '',
     membership_start DATE NULL,
     membership_expiry DATE NULL,
+    visit_limit INT NULL,
     payment_amount DECIMAL(10, 2) NOT NULL DEFAULT 0,
     due_amount DECIMAL(10, 2) NOT NULL DEFAULT 0,
     payment_mode VARCHAR(16) NOT NULL DEFAULT 'UPI',
