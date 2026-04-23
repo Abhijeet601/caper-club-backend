@@ -50,6 +50,7 @@ if __package__:
     get_admin_sessions,
     get_admin_slots,
     get_admin_users,
+    get_face_enrollment_status,
     get_current_user_payload,
     get_session_timer,
     get_user_embeddings,
@@ -71,6 +72,7 @@ else:
   from db import SessionLocal, get_db, get_settings, initialize_database
   from models import User, UserRole
   from schemas import (
+
     AttendanceInput,
     CreateAnnouncementInput,
     CreateMembershipInput,
@@ -484,6 +486,14 @@ def session_timer(
   return get_session_timer(db, session_id)
 
 
+@app.get('/admin/face-enrollment-status')
+def face_enrollment_status(
+  _: User = Depends(get_current_admin),
+  db: Session = Depends(get_db),
+) -> dict:
+  return get_face_enrollment_status(db)
+
+
 @app.get('/admin/user/{user_id}/report')
 def user_report(
   user_id: str,
@@ -504,6 +514,7 @@ def session_end(
 
 if FRONTEND_DIR.exists():
   app.mount('/', StaticFiles(directory=FRONTEND_DIR, html=True), name='frontend')
+
 
 
 if __name__ == "__main__":

@@ -548,8 +548,24 @@ def _exit_lock_remaining_seconds(session: SessionRecord, now: datetime | None = 
   return max(0, MIN_EXIT_SECONDS - elapsed)
 
 
+def _session_limit_deadline(session: SessionRecord) -> datetime:
+  return session.started_at + timedelta(minutes=SESSION_LIMIT_MINUTES)
+
+
 def _session_deadline(session: SessionRecord) -> datetime:
-  return session.slot_end_at or (session.started_at + timedelta(minutes=SESSION_LIMIT_MINUTES))
+  limit_deadline = _session_limit_deadline(session)
+
+  if session.slot_end_at is None:
+    return limit_deadline
+
+  return min(limit_deadline, session.slot_end_at)
+
+
+def _session_deadline_note(session: SessionRecord) -> str:
+  if session.slot_end_at is not None and session.slot_end_at <= _session_limit_deadline(session):
+    return 'Session ended when the assigned slot closed.'
+
+  return f'Session ended automatically after {SESSION_LIMIT_MINUTES} minutes.'
 
 
 def _session_remaining_seconds(session: SessionRecord, now: datetime | None = None) -> int:
@@ -1017,8 +1033,8 @@ def _expire_overdue_sessions(db: Session, user_id: str | None = None) -> None:
     .where(
       SessionRecord.status == SessionStatus.ACTIVE,
       or_(
+        (SessionRecord.started_at <= fixed_limit_cutoff),
         (SessionRecord.slot_end_at.is_not(None) & (SessionRecord.slot_end_at <= now)),
-        (SessionRecord.slot_end_at.is_(None) & (SessionRecord.started_at <= fixed_limit_cutoff)),
       ),
     )
   )
@@ -1035,11 +1051,7 @@ def _expire_overdue_sessions(db: Session, user_id: str | None = None) -> None:
     _expire_session(
       db,
       session=session,
-      note=(
-        'Session ended when the assigned slot closed.'
-        if session.slot_end_at
-        else f'Session ended automatically after {SESSION_LIMIT_MINUTES} minutes.'
-      ),
+      note=_session_deadline_note(session),
     )
 
   db.commit()
@@ -2682,6 +2694,45 @@ def get_session_timer(db: Session, session_id: str) -> dict[str, Any]:
   }
 
 
+def get_face_enrollment_status(db: Session) -> dict[str, Any]:
+  from sqlalchemy import select
+  from sqlalchemy.orm import selectinload
+  
+  # Count totals
+  total_users = db.scalar(select(func.count(User.id)).where(User.role == UserRole.USER))
+  enrolled_count = db.scalar(
+    select(func.count(User.id))
+    .where(User.role == UserRole.USER, User.face_images_count > 0)
+  )
+  pending_count = total_users - enrolled_count
+  
+  # Fetch enrolled users (top 20 recently updated)
+  enrolled = db.scalars(
+    select(User)
+    .options(selectinload(User.slot))
+    .where(User.role == UserRole.USER, User.face_images_count > 0)
+    .order_by(User.updated_at.desc())
+    .limit(20)
+  ).all()
+  
+  # Fetch pending users (all, ordered by creation)
+  pending = db.scalars(
+    select(User)
+    .options(selectinload(User.slot))
+    .where(User.role == UserRole.USER, User.face_images_count == 0)
+    .order_by(User.created_at.asc())
+  ).all()
+  
+  return {
+    'total_users': total_users,
+    'enrolled_count': enrolled_count,
+    'pending_count': pending_count,
+    'enrolled_percentage': round((enrolled_count / max(total_users, 1)) * 100, 1),
+    'enrolled': [_serialize_user(user) for user in enrolled],
+    'pending': [_serialize_user(user) for user in pending],
+  }
+
+
 def get_user_profile(db: Session, user: User) -> dict[str, Any]:
   return _serialize_user(_get_user_by_id(db, user.id))
 
@@ -2725,6 +2776,7 @@ $synth.Dispose()
     raise ApiError('Local TTS generation timed out.', 500) from error
   finally:
     temp_path.unlink(missing_ok=True)
+
 
 
 def _audio_mime_type(output_format: str) -> str:
