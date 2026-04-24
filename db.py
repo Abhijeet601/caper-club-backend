@@ -723,6 +723,70 @@ def _ensure_member_profile_schema() -> None:
   )
 
 
+def _ensure_query_performance_indexes() -> None:
+  inspector = inspect(engine)
+  _ensure_index_exists(
+    inspector,
+    table_name='users',
+    index_name='idx_users_role_created_at',
+    create_sql='CREATE INDEX `idx_users_role_created_at` ON `users` (`role`, `created_at`)',
+  )
+  _ensure_index_exists(
+    inspector,
+    table_name='users',
+    index_name='idx_users_role_updated_at',
+    create_sql='CREATE INDEX `idx_users_role_updated_at` ON `users` (`role`, `updated_at`)',
+  )
+  _ensure_index_exists(
+    inspector,
+    table_name='sessions',
+    index_name='idx_sessions_user_status_started_at',
+    create_sql='CREATE INDEX `idx_sessions_user_status_started_at` ON `sessions` (`user_id`, `status`, `started_at`)',
+  )
+  _ensure_index_exists(
+    inspector,
+    table_name='sessions',
+    index_name='idx_sessions_status_started_at',
+    create_sql='CREATE INDEX `idx_sessions_status_started_at` ON `sessions` (`status`, `started_at`)',
+  )
+  _ensure_index_exists(
+    inspector,
+    table_name='sessions',
+    index_name='idx_sessions_status_slot_end_at',
+    create_sql='CREATE INDEX `idx_sessions_status_slot_end_at` ON `sessions` (`status`, `slot_end_at`)',
+  )
+  _ensure_index_exists(
+    inspector,
+    table_name='user_timelines',
+    index_name='idx_user_timelines_event_occurred_at',
+    create_sql='CREATE INDEX `idx_user_timelines_event_occurred_at` ON `user_timelines` (`event_type`, `occurred_at`)',
+  )
+  _ensure_index_exists(
+    inspector,
+    table_name='user_timelines',
+    index_name='idx_user_timelines_user_occurred_at',
+    create_sql='CREATE INDEX `idx_user_timelines_user_occurred_at` ON `user_timelines` (`user_id`, `occurred_at`)',
+  )
+  _ensure_index_exists(
+    inspector,
+    table_name='payment_history',
+    index_name='idx_payment_history_user_created_at',
+    create_sql='CREATE INDEX `idx_payment_history_user_created_at` ON `payment_history` (`user_id`, `created_at`)',
+  )
+  _ensure_index_exists(
+    inspector,
+    table_name='payment_history',
+    index_name='idx_payment_history_created_at',
+    create_sql='CREATE INDEX `idx_payment_history_created_at` ON `payment_history` (`created_at`)',
+  )
+  _ensure_index_exists(
+    inspector,
+    table_name='announcements',
+    index_name='idx_announcements_user_created_at',
+    create_sql='CREATE INDEX `idx_announcements_user_created_at` ON `announcements` (`user_id`, `created_at`)',
+  )
+
+
 def _ensure_runtime_compatible_schema() -> None:
   inspector = inspect(engine)
 
@@ -756,4 +820,5 @@ def initialize_database() -> None:
   Base.metadata.create_all(bind=engine)
   _ensure_slot_schema()
   _ensure_member_profile_schema()
+  _ensure_query_performance_indexes()
   _ensure_runtime_compatible_schema()

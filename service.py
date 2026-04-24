@@ -7,10 +7,12 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from collections import Counter, deque
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
+from threading import Lock
 from typing import Any
 from urllib import error as urllib_error
 from urllib.parse import quote, urlencode
@@ -124,6 +126,15 @@ CLUB_TIMEZONE = ZoneInfo('Asia/Kolkata')
 RECENT_SCAN_EVENTS: deque[dict[str, Any]] = deque(maxlen=12)
 ELEVENLABS_MODEL_ID = 'eleven_multilingual_v2'
 DEFAULT_VOICE_ID = 'pNInz6obpgDQGcFmaJgB'
+READ_SIDE_EXPIRY_TTL_SECONDS = 5.0
+USER_EMBEDDINGS_CACHE_TTL_SECONDS = 60.0
+
+_expire_overdue_sessions_lock = Lock()
+_expire_overdue_sessions_last_all_at = 0.0
+_expire_overdue_sessions_last_by_user: dict[str, float] = {}
+_user_embeddings_cache_lock = Lock()
+_user_embeddings_cache_payload: list[dict[str, Any]] | None = None
+_user_embeddings_cache_at = 0.0
 
 
 class ApiError(Exception):
@@ -719,6 +730,58 @@ def _serialize_auth_user(user: User) -> dict[str, Any]:
   }
 
 
+def _serialize_user_summary(user: User) -> dict[str, Any]:
+  last_action = _serialize_attendance_action(user.last_action)
+  last_action_at = _serialize_datetime(user.last_action_at)
+  membership_visits_allowed = _membership_visit_limit(user)
+
+  return {
+    'id': user.id,
+    'memberId': _resolve_member_id(user),
+    'name': user.name,
+    'email': user.email,
+    'mobileNumber': user.mobile_number,
+    'mobile_number': user.mobile_number,
+    'role': user.role.value,
+    'slotId': user.slot_id,
+    'slotName': user.slot.name if user.slot else None,
+    'slotStartTime': _serialize_time(user.slot.start_time) if user.slot else None,
+    'slotEndTime': _serialize_time(user.slot.end_time) if user.slot else None,
+    'slot': _serialize_slot(user.slot),
+    'sport': _resolve_sport(user),
+    'membershipLevel': _resolve_membership_level(user),
+    'membershipPlan': user.membership_plan,
+    'membershipStatus': _membership_status(user),
+    'membershipStart': _serialize_date(user.membership_start),
+    'membershipExpiry': _serialize_date(user.membership_expiry),
+    'visitLimit': user.visit_limit,
+    'paymentAmount': _resolve_payment_amount(user),
+    'dueAmount': _resolve_due_amount(user),
+    'paymentMode': _resolve_payment_mode(user),
+    'paymentStatus': _resolve_payment_status(user),
+    'faceImageUrl': None,
+    'lastAction': last_action,
+    'lastActionAt': last_action_at,
+    'lastTimestamp': last_action_at,
+    'cooldownRemainingSeconds': _action_cooldown_remaining_seconds(user),
+    'daysLeft': _days_left(user),
+    'faceImageCount': user.face_images_count,
+    'createdAt': _serialize_datetime(user.created_at),
+    'updatedAt': _serialize_datetime(user.updated_at),
+    'plan': user.membership_plan,
+    'startDate': _serialize_date(user.membership_start),
+    'expiry': _serialize_date(user.membership_expiry),
+    'status': _membership_status(user),
+    'imageCount': user.face_images_count,
+    'hue': _deterministic_hue(user.id),
+    'visits': 0,
+    'membershipVisitsAllowed': membership_visits_allowed,
+    'membershipVisitsUsed': 0,
+    'membershipVisitsRemaining': membership_visits_allowed,
+    'confidence': 0,
+  }
+
+
 def _serialize_user(user: User) -> dict[str, Any]:
   visit_stats = _membership_visit_stats(user)
   latest_session = max(user.sessions, key=lambda item: item.started_at, default=None)
@@ -887,15 +950,23 @@ def _get_user_by_id(db: Session, user_id: str) -> User:
   return user
 
 
+def _get_user_with_slot_by_id(db: Session, user_id: str) -> User:
+  user = db.scalar(
+    select(User)
+    .options(selectinload(User.slot))
+    .where(User.id == user_id)
+  )
+
+  if user is None:
+    raise ApiError('User not found.', 404)
+
+  return user
+
+
 def _get_user_by_email(db: Session, email: str) -> User | None:
   return db.scalar(
     select(User)
     .options(
-      selectinload(User.face_embeddings),
-      selectinload(User.sessions),
-      selectinload(User.timelines),
-      selectinload(User.notifications),
-      selectinload(User.payments),
       selectinload(User.slot),
     )
     .where(User.email == email)
@@ -905,14 +976,6 @@ def _get_user_by_email(db: Session, email: str) -> User | None:
 def _get_user_by_member_id(db: Session, member_id: str) -> User | None:
   return db.scalar(
     select(User)
-    .options(
-      selectinload(User.face_embeddings),
-      selectinload(User.sessions),
-      selectinload(User.timelines),
-      selectinload(User.notifications),
-      selectinload(User.payments),
-      selectinload(User.slot),
-    )
     .where(User.member_id == member_id)
   )
 
@@ -923,14 +986,6 @@ def _get_user_by_mobile_number(db: Session, mobile_number: str | None) -> User |
 
   return db.scalar(
     select(User)
-    .options(
-      selectinload(User.face_embeddings),
-      selectinload(User.sessions),
-      selectinload(User.timelines),
-      selectinload(User.notifications),
-      selectinload(User.payments),
-      selectinload(User.slot),
-    )
     .where(User.mobile_number == mobile_number)
   )
 
@@ -966,6 +1021,7 @@ def _active_session_for_user(db: Session, user_id: str) -> SessionRecord | None:
       SessionRecord.status == SessionStatus.ACTIVE,
     )
     .order_by(SessionRecord.started_at.desc())
+    .limit(1)
   )
 
 
@@ -975,6 +1031,7 @@ def _latest_session_for_user(db: Session, user_id: str) -> SessionRecord | None:
     .options(selectinload(SessionRecord.user), selectinload(SessionRecord.slot))
     .where(SessionRecord.user_id == user_id)
     .order_by(SessionRecord.updated_at.desc(), SessionRecord.started_at.desc())
+    .limit(1)
   )
 
 
@@ -999,6 +1056,7 @@ def _latest_session_for_user_on_date(
       SessionRecord.started_at < day_end_utc,
     )
     .order_by(SessionRecord.updated_at.desc(), SessionRecord.started_at.desc())
+    .limit(1)
   )
 
 
@@ -1055,6 +1113,44 @@ def _expire_overdue_sessions(db: Session, user_id: str | None = None) -> None:
     )
 
   db.commit()
+
+
+def _expire_overdue_sessions_cached(
+  db: Session,
+  user_id: str | None = None,
+  *,
+  ttl_seconds: float = READ_SIDE_EXPIRY_TTL_SECONDS,
+) -> None:
+  global _expire_overdue_sessions_last_all_at
+
+  now = time.monotonic()
+  normalized_user_id = str(user_id or '').strip()
+
+  with _expire_overdue_sessions_lock:
+    if (now - _expire_overdue_sessions_last_all_at) < ttl_seconds:
+      return
+
+    if normalized_user_id:
+      last_at = _expire_overdue_sessions_last_by_user.get(normalized_user_id, 0.0)
+      if (now - last_at) < ttl_seconds:
+        return
+
+    _expire_overdue_sessions(db, normalized_user_id or None)
+
+    completed_at = time.monotonic()
+    if normalized_user_id:
+      _expire_overdue_sessions_last_by_user[normalized_user_id] = completed_at
+      stale_cutoff = completed_at - max(ttl_seconds * 4, 30.0)
+      stale_user_ids = [
+        cached_user_id
+        for cached_user_id, cached_at in _expire_overdue_sessions_last_by_user.items()
+        if cached_at < stale_cutoff
+      ]
+      for stale_user_id in stale_user_ids:
+        _expire_overdue_sessions_last_by_user.pop(stale_user_id, None)
+    else:
+      _expire_overdue_sessions_last_all_at = completed_at
+      _expire_overdue_sessions_last_by_user.clear()
 
 
 def _tone_from_scan_status(status: str) -> Tone:
@@ -1217,6 +1313,14 @@ def _descriptor_centroid(encodings: list[np.ndarray]) -> list[float] | None:
     centroid = centroid / magnitude
 
   return _descriptor_to_payload(centroid)
+
+
+def _invalidate_user_embeddings_cache() -> None:
+  global _user_embeddings_cache_payload, _user_embeddings_cache_at
+
+  with _user_embeddings_cache_lock:
+    _user_embeddings_cache_payload = None
+    _user_embeddings_cache_at = 0.0
 
 
 def _save_user_face_image(user_id: str, image_bytes: bytes, index: int) -> str:
@@ -1464,7 +1568,7 @@ def _reports_payload(db: Session) -> dict[str, Any]:
 
   users = db.scalars(
     select(User)
-    .options(selectinload(User.sessions), selectinload(User.timelines))
+    .where(User.role == UserRole.USER)
     .order_by(User.updated_at.desc())
   ).all()
   payments = db.scalars(
@@ -1669,12 +1773,14 @@ def delete_slot(db: Session, slot_id: str) -> dict[str, Any]:
 
 
 def get_admin_dashboard(db: Session) -> dict[str, Any]:
-  _expire_overdue_sessions(db)
+  _expire_overdue_sessions_cached(db)
   total_users = db.scalar(select(func.count(User.id)).where(User.role == UserRole.USER)) or 0
+  day_start_utc, day_end_utc = _day_window_for_local_date(_club_today())
   attendance_today = db.scalar(
     select(func.count(UserTimeline.id)).where(
       UserTimeline.event_type == TimelineEventType.ENTRY,
-      func.date(UserTimeline.occurred_at) == _club_today(),
+      UserTimeline.occurred_at >= day_start_utc,
+      UserTimeline.occurred_at < day_end_utc,
     )
   ) or 0
   expired_memberships = db.scalar(
@@ -1736,12 +1842,11 @@ def get_admin_dashboard(db: Session) -> dict[str, Any]:
   return {
     'stats': stats,
     'liveFeed': _live_feed_items(db),
-    'reports': _reports_payload(db),
   }
 
 
 def get_user_dashboard(db: Session, user: User) -> dict[str, Any]:
-  _expire_overdue_sessions(db, user.id)
+  _expire_overdue_sessions_cached(db, user.id)
   hydrated_user = _get_user_by_id(db, user.id)
   active_session = _active_session_for_user(db, hydrated_user.id)
   timeline = db.scalars(
@@ -1779,20 +1884,21 @@ def get_user_dashboard(db: Session, user: User) -> dict[str, Any]:
 
 
 def get_admin_users(db: Session) -> list[dict[str, Any]]:
-  _expire_overdue_sessions(db)
+  _expire_overdue_sessions_cached(db)
   users = db.scalars(
     select(User)
-    .options(selectinload(User.sessions), selectinload(User.timelines), selectinload(User.slot))
+    .options(selectinload(User.slot))
+    .where(User.role == UserRole.USER)
     .order_by(User.created_at.desc())
   ).all()
-  return [_serialize_user(user) for user in users]
+  return [_serialize_user_summary(user) for user in users]
 
 def get_user_report(db: Session, user_id: str) -> dict[str, Any]:
   """
   Full report for admin - all user data
   """
   user = _get_user_by_id(db, user_id)
-  _expire_overdue_sessions(db, user_id)
+  _expire_overdue_sessions_cached(db, user_id)
   
   sessions = db.scalars(
     select(SessionRecord).where(SessionRecord.user_id == user_id)
@@ -1920,6 +2026,7 @@ def create_membership(db: Session, input_data: CreateMembershipInput) -> dict[st
   )
   db.commit()
   db.refresh(payment)
+  _invalidate_user_embeddings_cache()
   return {
     'user': _serialize_user(_get_user_by_id(db, user.id)),
     'payment': _serialize_payment(payment),
@@ -1933,6 +2040,7 @@ def delete_user(db: Session, user_id: str, current_user: User) -> dict[str, Any]
   user = _get_user_by_id(db, user_id)
   db.delete(user)
   db.commit()
+  _invalidate_user_embeddings_cache()
   return {'message': f'{user.name} deleted successfully.'}
 
 
@@ -1996,6 +2104,7 @@ def update_user(db: Session, user_id: str, input_data: UpdateUserInput) -> dict[
     )
 
   db.commit()
+  _invalidate_user_embeddings_cache()
   return _serialize_user(_get_user_by_id(db, user.id))
 
 
@@ -2033,6 +2142,7 @@ def upload_faces(db: Session, actor: User, input_data: UploadFaceInput) -> dict[
   user.face_images_count = len(valid_encodings)
   user.updated_at = utcnow()
   db.commit()
+  _invalidate_user_embeddings_cache()
   return {
     'user': _serialize_user(_get_user_by_id(db, user.id)),
     'embeddingCount': len(valid_encodings),
@@ -2069,6 +2179,7 @@ def save_user_embeddings(
   user.face_images_count = len(descriptors)
   user.updated_at = utcnow()
   db.commit()
+  _invalidate_user_embeddings_cache()
 
   return {
     'user': _serialize_user(_get_user_by_id(db, user.id)),
@@ -2079,6 +2190,15 @@ def save_user_embeddings(
 
 
 def get_user_embeddings(db: Session) -> list[dict[str, Any]]:
+  global _user_embeddings_cache_payload, _user_embeddings_cache_at
+
+  with _user_embeddings_cache_lock:
+    if (
+      _user_embeddings_cache_payload is not None
+      and (time.monotonic() - _user_embeddings_cache_at) < USER_EMBEDDINGS_CACHE_TTL_SECONDS
+    ):
+      return _user_embeddings_cache_payload
+
   users = db.scalars(
     select(User)
     .options(selectinload(User.face_embeddings), selectinload(User.slot))
@@ -2119,6 +2239,10 @@ def get_user_embeddings(db: Session) -> list[dict[str, Any]]:
         'updatedAt': _serialize_datetime(user.updated_at),
       }
     )
+
+  with _user_embeddings_cache_lock:
+    _user_embeddings_cache_payload = payload
+    _user_embeddings_cache_at = time.monotonic()
 
   return payload
 
@@ -2165,7 +2289,7 @@ def _find_best_user_match(
 
 
 def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
-  user = _get_user_by_id(db, input_data.userId)
+  user = _get_user_with_slot_by_id(db, input_data.userId)
   _expire_overdue_sessions(db, user.id)
 
   attendance_time = utcnow()
@@ -2540,7 +2664,7 @@ def perform_access_scan(db: Session, input_data: AccessScanInput) -> dict[str, A
 
 
 def start_session(db: Session, input_data: SessionStartInput) -> dict[str, Any]:
-  user = _get_user_by_id(db, input_data.userId)
+  user = _get_user_with_slot_by_id(db, input_data.userId)
 
   if _membership_status(user) == 'expired':
     raise ApiError('Membership expired. Cannot start a session.', 400)
@@ -2618,12 +2742,12 @@ def get_admin_announcements(db: Session) -> list[dict[str, Any]]:
 
 
 def get_admin_reports(db: Session) -> dict[str, Any]:
-  _expire_overdue_sessions(db)
+  _expire_overdue_sessions_cached(db)
   return _reports_payload(db)
 
 
 def get_admin_sessions(db: Session) -> list[dict[str, Any]]:
-  _expire_overdue_sessions(db)
+  _expire_overdue_sessions_cached(db)
   sessions = db.scalars(
     select(SessionRecord)
     .options(selectinload(SessionRecord.user), selectinload(SessionRecord.slot))
@@ -2661,7 +2785,7 @@ def get_user_payments(db: Session, user: User) -> list[dict[str, Any]]:
 
 
 def get_session_timer(db: Session, session_id: str) -> dict[str, Any]:
-  _expire_overdue_sessions(db)
+  _expire_overdue_sessions_cached(db)
   session = _get_session_by_id(db, session_id)
   duration_min = _session_duration_minutes(session)
   remaining_sec = _session_remaining_seconds(session)
@@ -2699,11 +2823,11 @@ def get_face_enrollment_status(db: Session) -> dict[str, Any]:
   from sqlalchemy.orm import selectinload
   
   # Count totals
-  total_users = db.scalar(select(func.count(User.id)).where(User.role == UserRole.USER))
+  total_users = db.scalar(select(func.count(User.id)).where(User.role == UserRole.USER)) or 0
   enrolled_count = db.scalar(
     select(func.count(User.id))
     .where(User.role == UserRole.USER, User.face_images_count > 0)
-  )
+  ) or 0
   pending_count = total_users - enrolled_count
   
   # Fetch enrolled users (top 20 recently updated)
@@ -2728,8 +2852,8 @@ def get_face_enrollment_status(db: Session) -> dict[str, Any]:
     'enrolled_count': enrolled_count,
     'pending_count': pending_count,
     'enrolled_percentage': round((enrolled_count / max(total_users, 1)) * 100, 1),
-    'enrolled': [_serialize_user(user) for user in enrolled],
-    'pending': [_serialize_user(user) for user in pending],
+    'enrolled': [_serialize_user_summary(user) for user in enrolled],
+    'pending': [_serialize_user_summary(user) for user in pending],
   }
 
 
