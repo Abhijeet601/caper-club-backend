@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -248,10 +248,11 @@ def admin_dashboard(
 
 @app.get('/admin/users')
 def admin_users(
+  scope: str = Query(default='full', pattern='^(full|live)$'),
   _: User = Depends(get_current_admin),
   db: Session = Depends(get_db),
 ) -> list[dict]:
-  return get_admin_users(db)
+  return get_admin_users(db, scope=scope)
 
 
 @app.get('/admin/slots')
@@ -365,18 +366,20 @@ def admin_create_membership(
 
 @app.get('/admin/sessions')
 def admin_sessions(
+  scope: str = Query(default='full', pattern='^(full|live)$'),
   _: User = Depends(get_current_admin),
   db: Session = Depends(get_db),
 ) -> list[dict]:
-  return get_admin_sessions(db)
+  return get_admin_sessions(db, scope=scope)
 
 
 @app.get('/admin/reports')
 def admin_reports(
+  scope: str = Query(default='full', pattern='^(full|live)$'),
   _: User = Depends(get_current_admin),
   db: Session = Depends(get_db),
 ) -> dict:
-  return get_admin_reports(db)
+  return get_admin_reports(db, scope=scope)
 
 
 @app.get('/admin/announcements')

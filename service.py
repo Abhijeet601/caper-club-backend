@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, load_only, selectinload
 
 if __package__:
   from .db import get_settings
@@ -128,6 +128,8 @@ ELEVENLABS_MODEL_ID = 'eleven_multilingual_v2'
 DEFAULT_VOICE_ID = 'pNInz6obpgDQGcFmaJgB'
 READ_SIDE_EXPIRY_TTL_SECONDS = 5.0
 USER_EMBEDDINGS_CACHE_TTL_SECONDS = 60.0
+LIVE_DASHBOARD_SESSION_LIMIT = 120
+LIVE_DASHBOARD_PAYMENT_LIMIT = 80
 
 _expire_overdue_sessions_lock = Lock()
 _expire_overdue_sessions_last_all_at = 0.0
@@ -686,6 +688,86 @@ def _serialize_announcement(item: Announcement) -> dict[str, Any]:
     'targetName': item.target_user.name if item.target_user else None,
     'createdAt': _serialize_datetime(item.created_at),
   }
+
+
+def _normalize_admin_scope(scope: str | None) -> str:
+  normalized = str(scope or 'full').strip().lower()
+  return 'live' if normalized == 'live' else 'full'
+
+
+def _admin_user_summary_query():
+  return (
+    select(User)
+    .options(
+      load_only(
+        User.id,
+        User.name,
+        User.email,
+        User.role,
+        User.mobile_number,
+        User.member_id,
+        User.slot_id,
+        User.sport,
+        User.membership_plan,
+        User.membership_level,
+        User.membership_start,
+        User.membership_expiry,
+        User.visit_limit,
+        User.payment_amount,
+        User.due_amount,
+        User.payment_mode,
+        User.payment_status,
+        User.last_action,
+        User.last_action_at,
+        User.note,
+        User.face_images_count,
+        User.created_at,
+        User.updated_at,
+      ),
+      selectinload(User.slot).load_only(
+        TimeSlot.id,
+        TimeSlot.name,
+        TimeSlot.start_time,
+        TimeSlot.end_time,
+      ),
+    )
+    .where(User.role == UserRole.USER)
+    .order_by(User.created_at.desc())
+  )
+
+
+def _admin_session_query():
+  return (
+    select(SessionRecord)
+    .options(
+      load_only(
+        SessionRecord.id,
+        SessionRecord.user_id,
+        SessionRecord.slot_id,
+        SessionRecord.area,
+        SessionRecord.status,
+        SessionRecord.confidence,
+        SessionRecord.started_at,
+        SessionRecord.ended_at,
+        SessionRecord.slot_start_at,
+        SessionRecord.slot_end_at,
+      ),
+      selectinload(SessionRecord.user).load_only(
+        User.id,
+        User.name,
+        User.email,
+        User.member_id,
+        User.membership_plan,
+        User.note,
+      ),
+      selectinload(SessionRecord.slot).load_only(
+        TimeSlot.id,
+        TimeSlot.name,
+        TimeSlot.start_time,
+        TimeSlot.end_time,
+      ),
+    )
+  )
 
 
 def _first_face_asset_url(user: User) -> str | None:
@@ -1497,7 +1579,19 @@ def _live_feed_items(db: Session) -> list[dict[str, Any]]:
 
   sessions = db.scalars(
     select(SessionRecord)
-    .options(selectinload(SessionRecord.user))
+    .options(
+      load_only(
+        SessionRecord.id,
+        SessionRecord.area,
+        SessionRecord.confidence,
+        SessionRecord.started_at,
+      ),
+      selectinload(SessionRecord.user).load_only(
+        User.id,
+        User.name,
+        User.face_images_count,
+      ),
+    )
     .order_by(SessionRecord.started_at.desc())
     .limit(4)
   ).all()
@@ -1524,10 +1618,24 @@ def _live_feed_items(db: Session) -> list[dict[str, Any]]:
   return fallback
 
 
-def _reports_payload(db: Session) -> dict[str, Any]:
+def _reports_payload(
+  db: Session,
+  *,
+  payments_limit: int | None = None,
+) -> dict[str, Any]:
   timeline_items = db.scalars(
     select(UserTimeline)
-    .options(selectinload(UserTimeline.user))
+    .options(
+      load_only(
+        UserTimeline.id,
+        UserTimeline.user_id,
+        UserTimeline.event_type,
+        UserTimeline.area,
+        UserTimeline.occurred_at,
+        UserTimeline.note,
+      ),
+      selectinload(UserTimeline.user).load_only(User.id, User.name),
+    )
     .order_by(UserTimeline.occurred_at.desc())
     .limit(50)
   ).all()
@@ -1568,14 +1676,46 @@ def _reports_payload(db: Session) -> dict[str, Any]:
 
   users = db.scalars(
     select(User)
+    .options(
+      load_only(
+        User.id,
+        User.name,
+        User.role,
+        User.membership_plan,
+        User.membership_expiry,
+        User.due_amount,
+      ),
+    )
     .where(User.role == UserRole.USER)
     .order_by(User.updated_at.desc())
   ).all()
-  payments = db.scalars(
+  payments_query = (
     select(PaymentHistory)
-    .options(selectinload(PaymentHistory.user))
+    .options(
+      load_only(
+        PaymentHistory.id,
+        PaymentHistory.user_id,
+        PaymentHistory.plan,
+        PaymentHistory.amount,
+        PaymentHistory.payment_mode,
+        PaymentHistory.payment_status,
+        PaymentHistory.membership_start,
+        PaymentHistory.membership_expiry,
+        PaymentHistory.source,
+        PaymentHistory.created_at,
+      ),
+      selectinload(PaymentHistory.user).load_only(
+        User.id,
+        User.name,
+        User.member_id,
+        User.note,
+      ),
+    )
     .order_by(PaymentHistory.created_at.desc())
-  ).all()
+  )
+  if payments_limit is not None:
+    payments_query = payments_query.limit(max(1, int(payments_limit)))
+  payments = db.scalars(payments_query).all()
   defaulters: list[dict[str, Any]] = []
   for user in users:
     if user.role != UserRole.USER:
@@ -1883,14 +2023,13 @@ def get_user_dashboard(db: Session, user: User) -> dict[str, Any]:
   }
 
 
-def get_admin_users(db: Session) -> list[dict[str, Any]]:
+def get_admin_users(
+  db: Session,
+  scope: str = 'full',
+) -> list[dict[str, Any]]:
+  _ = _normalize_admin_scope(scope)
   _expire_overdue_sessions_cached(db)
-  users = db.scalars(
-    select(User)
-    .options(selectinload(User.slot))
-    .where(User.role == UserRole.USER)
-    .order_by(User.created_at.desc())
-  ).all()
+  users = db.scalars(_admin_user_summary_query()).all()
   return [_serialize_user_summary(user) for user in users]
 
 def get_user_report(db: Session, user_id: str) -> dict[str, Any]:
@@ -2741,18 +2880,55 @@ def get_admin_announcements(db: Session) -> list[dict[str, Any]]:
   return [_serialize_announcement(item) for item in announcements]
 
 
-def get_admin_reports(db: Session) -> dict[str, Any]:
+def get_admin_reports(
+  db: Session,
+  scope: str = 'full',
+) -> dict[str, Any]:
+  normalized_scope = _normalize_admin_scope(scope)
   _expire_overdue_sessions_cached(db)
-  return _reports_payload(db)
+  payments_limit = LIVE_DASHBOARD_PAYMENT_LIMIT if normalized_scope == 'live' else None
+  return _reports_payload(db, payments_limit=payments_limit)
 
 
-def get_admin_sessions(db: Session) -> list[dict[str, Any]]:
+def get_admin_sessions(
+  db: Session,
+  scope: str = 'full',
+) -> list[dict[str, Any]]:
+  normalized_scope = _normalize_admin_scope(scope)
   _expire_overdue_sessions_cached(db)
-  sessions = db.scalars(
-    select(SessionRecord)
-    .options(selectinload(SessionRecord.user), selectinload(SessionRecord.slot))
-    .order_by(SessionRecord.started_at.desc())
-  ).all()
+  session_query = _admin_session_query()
+
+  if normalized_scope == 'live':
+    active_sessions = db.scalars(
+      session_query
+      .where(SessionRecord.status == SessionStatus.ACTIVE)
+      .order_by(SessionRecord.started_at.desc())
+    ).all()
+    remaining = max(0, LIVE_DASHBOARD_SESSION_LIMIT - len(active_sessions))
+    recent_sessions = (
+      db.scalars(
+        session_query
+        .where(SessionRecord.status != SessionStatus.ACTIVE)
+        .order_by(SessionRecord.started_at.desc())
+        .limit(remaining)
+      ).all()
+      if remaining
+      else []
+    )
+    session_by_id: dict[str, SessionRecord] = {
+      session.id: session for session in active_sessions
+    }
+    for session in recent_sessions:
+      session_by_id.setdefault(session.id, session)
+    sessions = sorted(
+      session_by_id.values(),
+      key=lambda item: item.started_at,
+      reverse=True,
+    )
+  else:
+    sessions = db.scalars(
+      session_query.order_by(SessionRecord.started_at.desc())
+    ).all()
   return [_serialize_session(item) for item in sessions]
 
 
