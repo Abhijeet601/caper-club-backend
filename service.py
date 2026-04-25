@@ -1788,7 +1788,7 @@ def authenticate_user(db: Session, input_data: LoginInput) -> dict[str, Any]:
 def register_user(db: Session, input_data: RegisterInput) -> dict[str, Any]:
   _ = db
   _ = input_data
-  raise ApiError('Self-registration is disabled. Ask an admin to create your account.', 403)
+  raise ApiError('Only admins can create member IDs. Ask an admin to create your account.', 403)
 
 
 def seed_database(db: Session) -> None:
