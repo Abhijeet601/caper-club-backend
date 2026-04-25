@@ -98,17 +98,18 @@ class Settings(BaseSettings):
 
   @property
   def database_url(self) -> str:
+    # ALWAYS USE RAILWAY DATABASE - DO NOT FALLBACK TO LOCAL
     override = self.database_url_override
     if override:
       if override.startswith('mysql://'):
         return override.replace('mysql://', 'mysql+pymysql://', 1)
       return override
 
-    config = self.database_config
-    password = quote_plus(config['password'])
-    return (
-      f"mysql+pymysql://{config['user']}:{password}"
-      f"@{config['host']}:{config['port']}/{config['name']}"
+    # ENFORCE RAILWAY USAGE - Local database is not allowed
+    raise RuntimeError(
+      'Railway database connection required. '
+      'Set CAPERCLUB_DATABASE_URL environment variable to Railway MySQL connection string. '
+      'Local MySQL development is not supported.'
     )
 
   @property

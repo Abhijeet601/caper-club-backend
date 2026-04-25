@@ -1,3 +1,13 @@
+"""
+CaperClub Backend API
+=====================
+
+ALWAYS USE RAILWAY DATABASE
+- Backend is configured for Railway MySQL only
+- Local MySQL development is not supported
+- All data operations use Railway remote database
+"""
+
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
