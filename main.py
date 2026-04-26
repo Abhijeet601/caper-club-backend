@@ -52,6 +52,7 @@ if __package__:
     create_user,
     delete_slot,
     delete_user,
+    delete_user_embeddings,
     end_session,
     generate_tts,
     get_admin_announcements,
@@ -107,6 +108,7 @@ else:
     create_user,
     delete_slot,
     delete_user,
+    delete_user_embeddings,
     end_session,
     generate_tts,
     get_admin_announcements,
@@ -115,6 +117,7 @@ else:
     get_admin_sessions,
     get_admin_slots,
     get_admin_users,
+    get_face_enrollment_status,
     get_current_user_payload,
     get_session_timer,
     get_user_embeddings,
@@ -358,6 +361,15 @@ def users_embeddings_save(
   db: Session = Depends(get_db),
 ) -> dict:
   return save_user_embeddings(db, current_user, input_data)
+
+
+@app.delete('/admin/users/{user_id}/embeddings')
+def admin_delete_user_embeddings(
+  user_id: str,
+  current_user: User = Depends(get_current_admin),
+  db: Session = Depends(get_db),
+) -> dict:
+  return delete_user_embeddings(db, user_id=user_id, current_user=current_user)
 
 
 @app.post('/user/upload-face')

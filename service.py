@@ -2183,6 +2183,23 @@ def delete_user(db: Session, user_id: str, current_user: User) -> dict[str, Any]
   return {'message': f'{user.name} deleted successfully.'}
 
 
+def delete_user_embeddings(db: Session, user_id: str, current_user: User) -> dict[str, Any]:
+  if current_user.role != UserRole.ADMIN:
+    raise ApiError('Admin access required.', 403)
+
+  user = _get_user_by_id(db, user_id)
+  db.query(FaceEmbedding).filter(FaceEmbedding.user_id == user.id).delete()
+  user.face_images_count = 0
+  user.updated_at = utcnow()
+  db.commit()
+  _invalidate_user_embeddings_cache()
+
+  return {
+    'message': f'Face enrollment removed for {user.name}.',
+    'user': _serialize_user(_get_user_by_id(db, user.id)),
+  }
+
+
 def update_user(db: Session, user_id: str, input_data: UpdateUserInput) -> dict[str, Any]:
   user = _get_user_by_id(db, user_id)
   existing = _get_user_by_email(db, input_data.email)
@@ -2899,32 +2916,10 @@ def get_admin_sessions(
   session_query = _admin_session_query()
 
   if normalized_scope == 'live':
-    active_sessions = db.scalars(
-      session_query
-      .where(SessionRecord.status == SessionStatus.ACTIVE)
-      .order_by(SessionRecord.started_at.desc())
+    # Return all sessions for live dashboard to ensure all active are shown
+    sessions = db.scalars(
+      session_query.order_by(SessionRecord.started_at.desc())
     ).all()
-    remaining = max(0, LIVE_DASHBOARD_SESSION_LIMIT - len(active_sessions))
-    recent_sessions = (
-      db.scalars(
-        session_query
-        .where(SessionRecord.status != SessionStatus.ACTIVE)
-        .order_by(SessionRecord.started_at.desc())
-        .limit(remaining)
-      ).all()
-      if remaining
-      else []
-    )
-    session_by_id: dict[str, SessionRecord] = {
-      session.id: session for session in active_sessions
-    }
-    for session in recent_sessions:
-      session_by_id.setdefault(session.id, session)
-    sessions = sorted(
-      session_by_id.values(),
-      key=lambda item: item.started_at,
-      reverse=True,
-    )
   else:
     sessions = db.scalars(
       session_query.order_by(SessionRecord.started_at.desc())
