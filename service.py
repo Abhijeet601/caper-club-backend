@@ -1577,45 +1577,12 @@ def _live_feed_items(db: Session) -> list[dict[str, Any]]:
   if RECENT_SCAN_EVENTS:
     return [_serialize_live_feed_event(event) for event in list(RECENT_SCAN_EVENTS)]
 
-  sessions = db.scalars(
-    select(SessionRecord)
-    .options(
-      load_only(
-        SessionRecord.id,
-        SessionRecord.area,
-        SessionRecord.confidence,
-        SessionRecord.started_at,
-      ),
-      selectinload(SessionRecord.user).load_only(
-        User.id,
-        User.name,
-        User.face_images_count,
-      ),
-    )
-    .order_by(SessionRecord.started_at.desc())
-    .limit(4)
-  ).all()
+  return []
 
-  fallback: list[dict[str, Any]] = []
-  for session in sessions:
-    fallback.append(
-      {
-        'id': session.id,
-        'name': session.user.name,
-        'confidence': round(float(session.confidence or 0), 2),
-        'status': 'valid',
-        'area': session.area,
-        'framesCaptured': max(5, session.user.face_images_count),
-        'ttsActive': False,
-        'duplicateWarning': False,
-        'faceBox': None,
-        'message': 'Recent attendance activity',
-        'attendanceAction': 'in',
-        'scannedAt': _serialize_datetime(session.started_at),
-      }
-    )
 
-  return fallback
+def clear_live_feed() -> dict[str, Any]:
+  RECENT_SCAN_EVENTS.clear()
+  return {'message': 'Live feed cleared.', 'liveFeed': []}
 
 
 def _reports_payload(

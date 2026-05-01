@@ -46,6 +46,7 @@ if __package__:
   from .service import (
     ApiError,
     authenticate_user,
+    clear_live_feed,
     create_announcement,
     create_membership,
     create_slot,
@@ -102,6 +103,7 @@ else:
   from service import (
     ApiError,
     authenticate_user,
+    clear_live_feed,
     create_announcement,
     create_membership,
     create_slot,
@@ -517,6 +519,13 @@ def face_enrollment_status(
   db: Session = Depends(get_db),
 ) -> dict:
   return get_face_enrollment_status(db)
+
+
+@app.delete('/admin/live-feed')
+def admin_clear_live_feed(
+  _: User = Depends(get_current_admin),
+) -> dict:
+  return clear_live_feed()
 
 
 @app.get('/admin/user/{user_id}/report')
