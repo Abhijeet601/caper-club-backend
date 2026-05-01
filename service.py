@@ -2377,6 +2377,7 @@ def get_user_embeddings(db: Session) -> list[dict[str, Any]]:
     centroid = _descriptor_centroid(encodings)
     if centroid is None:
       continue
+    descriptors = [_descriptor_to_payload(encoding) for encoding in encodings]
 
     payload.append(
       {
@@ -2384,6 +2385,7 @@ def get_user_embeddings(db: Session) -> list[dict[str, Any]]:
         'memberId': _resolve_member_id(user),
         'name': user.name,
         'descriptor': centroid,
+        'descriptors': descriptors,
         'sampleCount': len(encodings),
         'faceImageUrl': _first_face_asset_url(user),
         'lastAction': _serialize_attendance_action(user.last_action),
