@@ -591,15 +591,15 @@ def _session_remaining_seconds(session: SessionRecord, now: datetime | None = No
 
 def _session_tts(session: SessionRecord) -> str:
   if session.status == SessionStatus.ACTIVE:
-    return 'Attendance active'
+    return _tts_entry_marked_hindi(session.user.name)
 
   if session.status == SessionStatus.DENIED:
-    return 'Access denied'
+    return 'एक्सेस अस्वीकार किया गया है। कृपया फ्रंट डेस्क से संपर्क करें।'
 
   if session.status == SessionStatus.EXPIRED:
-    return 'Your session has ended'
+    return 'आपका सेशन समय समाप्त हो गया है। कृपया अब एग्जिट करें।'
 
-  return 'Attendance marked'
+  return 'आपकी अटेंडेंस मार्क हो गई है।'
 
 
 def _serialize_session(session: SessionRecord) -> dict[str, Any]:
@@ -1451,6 +1451,109 @@ def _format_wait_time(seconds: int) -> str:
   return f'{remaining_seconds}s'
 
 
+def _format_wait_time_hindi(seconds: int) -> str:
+  minutes, remaining_seconds = divmod(max(seconds, 0), 60)
+
+  if minutes and remaining_seconds:
+    return f'{minutes} मिनट {remaining_seconds} सेकंड'
+
+  if minutes:
+    return f'{minutes} मिनट'
+
+  return f'{remaining_seconds} सेकंड'
+
+
+def _tts_entry_marked_hindi(name: str | None) -> str:
+  return (
+    f'नमस्ते {name}, आपकी अटेंडेंस सफलतापूर्वक मार्क हो गई है।'
+    if name
+    else 'नमस्ते, आपकी अटेंडेंस सफलतापूर्वक मार्क हो गई है।'
+  )
+
+
+def _tts_exit_marked_hindi(name: str | None) -> str:
+  return (
+    f'{name}, आपका एग्जिट सफलतापूर्वक मार्क हो गया है। धन्यवाद।'
+    if name
+    else 'आपका एग्जिट सफलतापूर्वक मार्क हो गया है। धन्यवाद।'
+  )
+
+
+def _hi_text(codes: str) -> str:
+  return ''.join(chr(int(code, 16)) for code in codes.split())
+
+
+HI_MINUTE = _hi_text('092E 093F 0928 091F')
+HI_SECOND = _hi_text('0938 0947 0915 0902 0921')
+HI_ENTRY_MARKED = _hi_text('0928 092E 0938 094D 0924 0947 002C 0020 0939 093E 091C 093F 0930 0940 0020 0926 0930 094D 091C 0020 0939 094B 0020 0917 092F 0940 0964')
+HI_EXIT_MARKED = _hi_text('0928 093F 0915 093E 0938 0020 0926 0930 094D 091C 0020 0939 094B 0020 0917 092F 093E 0964 0020 0927 0928 094D 092F 0935 093E 0926 0964')
+HI_PLEASE = _hi_text('0915 0943 092A 092F 093E')
+HI_WAIT_RETRY = _hi_text('0930 0941 0915 093F 090F 002C 0020 092B 093F 0930 0020 0915 094B 0936 093F 0936 0020 0915 0930 0947 0902 0964')
+HI_WAIT_EXIT = _hi_text('0930 0941 0915 093F 090F 002C 0020 0909 0938 0915 0947 0020 092C 093E 0926 0020 0928 093F 0915 093E 0938 0020 0915 0930 0947 0902 0964')
+HI_DUPLICATE = _hi_text('0939 093E 091C 093F 0930 0940 0020 092A 0939 0932 0947 0020 0938 0947 0020 0926 0930 094D 091C 0020 0939 0948 0964')
+HI_EXIT_DUPLICATE = _hi_text('0928 093F 0915 093E 0938 0020 092A 0939 0932 0947 0020 0938 0947 0020 0926 0930 094D 091C 0020 0939 0948 0964')
+HI_RETRY_FACE = _hi_text('091A 0947 0939 0930 093E 0020 0938 093E 092B 0020 0928 0939 0940 0902 0020 0939 0948 0964 0020 092B 093F 0930 0020 0915 094B 0936 093F 0936 0020 0915 0930 0947 0902 0964')
+HI_UNKNOWN_FACE = _hi_text('091A 0947 0939 0930 093E 0020 092A 0939 091A 093E 0928 0020 092E 0947 0902 0020 0928 0939 0940 0902 0020 0906 092F 093E 0964')
+HI_EXPIRED = _hi_text('0938 0926 0938 094D 092F 0924 093E 0020 0938 092E 093E 092A 094D 0924 0020 0939 0948 0964 0020 0915 093E 0930 094D 092F 093E 0932 092F 0020 0938 0947 0020 0938 0902 092A 0930 094D 0915 0020 0915 0930 0947 0902 0964')
+HI_DENIED = _hi_text('0905 0928 0941 092E 0924 093F 0020 0928 0939 0940 0902 0020 0939 0948 0964 0020 0915 093E 0930 094D 092F 093E 0932 092F 0020 0938 0947 0020 0938 0902 092A 0930 094D 0915 0020 0915 0930 0947 0902 0964')
+HI_SESSION_OVER = _hi_text('0938 092E 092F 0020 0938 092E 093E 092A 094D 0924 0020 0939 094B 0020 0917 092F 093E 0964 0020 0915 0943 092A 092F 093E 0020 0928 093F 0915 093E 0938 0020 0915 0930 0947 0902 0964')
+
+
+def _format_wait_time_hindi(seconds: int) -> str:
+  minutes, remaining_seconds = divmod(max(seconds, 0), 60)
+
+  if minutes and remaining_seconds:
+    return f'{minutes} {HI_MINUTE} {remaining_seconds} {HI_SECOND}'
+
+  if minutes:
+    return f'{minutes} {HI_MINUTE}'
+
+  return f'{remaining_seconds} {HI_SECOND}'
+
+
+def _tts_entry_marked_hindi(name: str | None) -> str:
+  return f'{name}, {HI_ENTRY_MARKED}' if name else HI_ENTRY_MARKED
+
+
+def _tts_exit_marked_hindi(name: str | None) -> str:
+  return f'{name}, {HI_EXIT_MARKED}' if name else HI_EXIT_MARKED
+
+
+def _scan_tts_hindi(
+  *,
+  status: str,
+  name: str | None,
+  attendance_action: str | None,
+  cooldown_remaining_seconds: int,
+  message: str,
+) -> str:
+  normalized_status = str(status or '').lower()
+  normalized_action = str(attendance_action or '').upper()
+  normalized_message = str(message or '').lower()
+
+  if normalized_status == 'granted':
+    return _tts_exit_marked_hindi(name) if normalized_action == 'OUT' else _tts_entry_marked_hindi(name)
+
+  if normalized_status == 'cooldown':
+    wait_for = _format_wait_time_hindi(cooldown_remaining_seconds)
+    wait_message = HI_WAIT_EXIT if normalized_action == 'OUT' else HI_WAIT_RETRY
+    return f'{HI_PLEASE} {wait_for} {wait_message}'
+
+  if normalized_status == 'duplicate':
+    return HI_EXIT_DUPLICATE if 'exit already' in normalized_message else HI_DUPLICATE
+
+  if normalized_status == 'retry':
+    return HI_RETRY_FACE
+
+  if normalized_status == 'unknown':
+    return HI_UNKNOWN_FACE
+
+  if 'expired' in normalized_message:
+    return HI_EXPIRED
+
+  return HI_DENIED
+
+
 def _record_scan_event(
   *,
   status: str,
@@ -1501,6 +1604,13 @@ def _build_scan_response(
   frames_captured: int,
 ) -> dict[str, Any]:
   resolved_user_id = (session or {}).get('userId')
+  resolved_tts_message = _scan_tts_hindi(
+    status=status,
+    name=name,
+    attendance_action=attendance_action,
+    cooldown_remaining_seconds=cooldown_remaining_seconds,
+    message=message,
+  )
   event = _record_scan_event(
     status=status,
     message=message,
@@ -1509,7 +1619,7 @@ def _build_scan_response(
     confidence=confidence,
     area=area,
     frames_captured=frames_captured,
-    tts_message=tts_message,
+    tts_message=resolved_tts_message,
     duplicate_warning=duplicate_warning,
     face_box=face_box,
     attendance_action=attendance_action,
@@ -1523,7 +1633,7 @@ def _build_scan_response(
     'name': name,
     'userId': resolved_user_id,
     'duplicateWarning': duplicate_warning,
-    'ttsMessage': tts_message,
+    'ttsMessage': resolved_tts_message,
     'attendanceAction': attendance_action,
     'session': session,
     'cooldownRemainingSeconds': cooldown_remaining_seconds,
@@ -2431,7 +2541,7 @@ def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
       confidence=confidence,
       name=user.name,
       duplicate_warning=False,
-      tts_message='Your membership has expired.',
+      tts_message='आपकी मेंबरशिप समाप्त हो गई है। कृपया फ्रंट डेस्क से संपर्क करें।',
       attendance_action=None,
       session=None,
       cooldown_remaining_seconds=0,
@@ -2448,7 +2558,7 @@ def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
         confidence=confidence,
         name=user.name,
         duplicate_warning=True,
-        tts_message='Attendance already recorded.',
+        tts_message='आपकी अटेंडेंस पहले से मार्क है।',
         attendance_action='in',
         session=_serialize_session(active_session),
         cooldown_remaining_seconds=0,
@@ -2465,7 +2575,7 @@ def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
         confidence=confidence,
         name=user.name,
         duplicate_warning=True,
-        tts_message='Please wait before exit.',
+        tts_message='कृपया थोड़ा रुकिए, उसके बाद एग्जिट करें।',
         attendance_action='out',
         session=_serialize_session(active_session),
         cooldown_remaining_seconds=exit_lock_remaining,
@@ -2496,7 +2606,7 @@ def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
       confidence=confidence,
       name=user.name,
       duplicate_warning=False,
-      tts_message=f'Exit marked successfully for {user.name}.',
+      tts_message=_tts_exit_marked_hindi(user.name),
       attendance_action='out',
       session=_serialize_session(_get_session_by_id(db, active_session.id)),
       cooldown_remaining_seconds=0,
@@ -2512,7 +2622,7 @@ def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
       confidence=confidence,
       name=user.name,
       duplicate_warning=True,
-      tts_message='Exit already recorded.' if action == 'OUT' else 'Attendance already recorded.',
+      tts_message='आज आपका एग्जिट पहले से मार्क हो चुका है।' if action == 'OUT' else 'आपकी अटेंडेंस पहले से मार्क है।',
       attendance_action=action.lower(),
       session=_serialize_session(today_session),
       cooldown_remaining_seconds=0,
@@ -2528,7 +2638,7 @@ def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
       confidence=confidence,
       name=user.name,
       duplicate_warning=True,
-      tts_message='No active session is open for this member.',
+      tts_message='इस मेंबर का कोई एक्टिव सेशन नहीं है।',
       attendance_action='out',
       session=None,
       cooldown_remaining_seconds=0,
@@ -2545,7 +2655,7 @@ def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
       confidence=confidence,
       name=user.name,
       duplicate_warning=True,
-      tts_message='Please wait before marking again.',
+      tts_message=f'कृपया {_format_wait_time_hindi(cooldown_remaining)} रुकिए, फिर दोबारा कोशिश करें।',
       attendance_action=None,
       session=None,
       cooldown_remaining_seconds=cooldown_remaining,
@@ -2585,7 +2695,7 @@ def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
     confidence=confidence,
     name=user.name,
     duplicate_warning=False,
-    tts_message=f'Entry marked successfully for {user.name}.',
+    tts_message=_tts_entry_marked_hindi(user.name),
     attendance_action='in',
     session=_serialize_session(_get_session_by_id(db, session.id)),
     cooldown_remaining_seconds=0,
@@ -2606,7 +2716,7 @@ def perform_access_scan(db: Session, input_data: AccessScanInput) -> dict[str, A
       confidence=0,
       name=None,
       duplicate_warning=False,
-      tts_message='Please look at the camera and try again.',
+      tts_message='चेहरा साफ नहीं दिख रहा है। कृपया कैमरे की तरफ देखकर दोबारा कोशिश करें।',
       attendance_action=None,
       session=None,
       cooldown_remaining_seconds=0,
@@ -2626,7 +2736,7 @@ def perform_access_scan(db: Session, input_data: AccessScanInput) -> dict[str, A
       confidence=confidence,
       name=None,
       duplicate_warning=False,
-      tts_message='Unknown face detected.',
+      tts_message='चेहरा पहचान में नहीं आया। कृपया दोबारा कोशिश करें।',
       attendance_action=None,
       session=None,
       cooldown_remaining_seconds=0,
@@ -2642,7 +2752,7 @@ def perform_access_scan(db: Session, input_data: AccessScanInput) -> dict[str, A
       confidence=confidence,
       name=user.name,
       duplicate_warning=False,
-      tts_message='Confidence is low. Please try again.',
+      tts_message='चेहरा साफ नहीं दिख रहा है। कृपया दोबारा कोशिश करें।',
       attendance_action=None,
       session=None,
       cooldown_remaining_seconds=0,
@@ -2658,7 +2768,7 @@ def perform_access_scan(db: Session, input_data: AccessScanInput) -> dict[str, A
       confidence=confidence,
       name=user.name,
       duplicate_warning=False,
-      tts_message='Your membership has expired.',
+      tts_message='आपकी मेंबरशिप समाप्त हो गई है। कृपया फ्रंट डेस्क से संपर्क करें।',
       attendance_action=None,
       session=None,
       cooldown_remaining_seconds=0,
@@ -2681,7 +2791,7 @@ def perform_access_scan(db: Session, input_data: AccessScanInput) -> dict[str, A
         confidence=confidence,
         name=user.name,
         duplicate_warning=True,
-        tts_message='Attendance already marked.',
+        tts_message='आपकी अटेंडेंस पहले से मार्क है।',
         attendance_action=None,
         session=_serialize_session(active_session),
         cooldown_remaining_seconds=duplicate_remaining,
@@ -2716,9 +2826,9 @@ def perform_access_scan(db: Session, input_data: AccessScanInput) -> dict[str, A
       name=user.name,
       duplicate_warning=False,
       tts_message=(
-        'Exit marked successfully.'
+        _tts_exit_marked_hindi(None)
         if over_limit
-        else f'Exit marked successfully. See you soon, {user.name}.'
+        else _tts_exit_marked_hindi(user.name)
       ),
       attendance_action='out',
       session=_serialize_session(refreshed_session),
@@ -2737,7 +2847,7 @@ def perform_access_scan(db: Session, input_data: AccessScanInput) -> dict[str, A
       confidence=confidence,
       name=user.name,
       duplicate_warning=True,
-      tts_message='Please wait 10 minutes before marking exit again.',
+      tts_message='कृपया 10 मिनट रुकिए, फिर दोबारा कोशिश करें।',
       attendance_action=None,
       session=None,
       cooldown_remaining_seconds=cooldown_remaining,
@@ -2778,7 +2888,7 @@ def perform_access_scan(db: Session, input_data: AccessScanInput) -> dict[str, A
     confidence=confidence,
     name=user.name,
     duplicate_warning=False,
-    tts_message=f'Welcome, {user.name}. Attendance marked successfully.',
+    tts_message=_tts_entry_marked_hindi(user.name),
     attendance_action='in',
     session=_serialize_session(refreshed_session),
     cooldown_remaining_seconds=0,
