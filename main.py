@@ -253,6 +253,11 @@ def login(input_data: LoginInput, db: Session = Depends(get_db)) -> dict:
   return authenticate_user(db, input_data)
 
 
+@app.post('/auth/login')
+def login_legacy(input_data: LoginInput, db: Session = Depends(get_db)) -> dict:
+  return authenticate_user(db, input_data)
+
+
 @app.post('/register', status_code=201)
 def register(input_data: RegisterInput, db: Session = Depends(get_db)) -> dict:
   return register_user(db, input_data)
