@@ -69,6 +69,11 @@ class Settings(BaseSettings):
   cors_origin_regex: str = (
     r'^https?://((localhost|127\.0\.0\.1)(:\d+)?|[a-z0-9-]+\.trycloudflare\.com)$'
   )
+  local_sqlite_path: str = str(BACKEND_DIR / 'data' / 'caperclub.dev.db')
+  prefer_local_sqlite: bool = Field(
+    default=True,
+    validation_alias=AliasChoices('CAPERCLUB_PREFER_LOCAL_SQLITE', 'PREFER_LOCAL_SQLITE'),
+  )
   elevenlabs_api_key: str = Field(
     default='',
     validation_alias=AliasChoices('CAPERCLUB_ELEVENLABS_API_KEY', 'ELEVENLABS_API_KEY'),
@@ -98,7 +103,11 @@ class Settings(BaseSettings):
 
   @property
   def database_url(self) -> str:
-    # ALWAYS USE RAILWAY DATABASE - DO NOT FALLBACK TO LOCAL
+    if self.should_use_local_sqlite:
+      sqlite_path = Path(self.local_sqlite_path).expanduser().resolve()
+      sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+      return f'sqlite:///{sqlite_path.as_posix()}'
+
     override = self.database_url_override
     if override:
       if override.startswith('mysql://'):
@@ -121,6 +130,17 @@ class Settings(BaseSettings):
   @property
   def database_url_override(self) -> str:
     return self.database_url_value.strip()
+
+  @property
+  def should_use_local_sqlite(self) -> bool:
+    if (
+      os.getenv('RAILWAY_PROJECT_ID')
+      or os.getenv('RAILWAY_SERVICE_ID')
+      or os.getenv('RAILWAY_ENVIRONMENT')
+      or os.getenv('RAILWAY_ENVIRONMENT_NAME')
+    ):
+      return False
+    return bool(self.prefer_local_sqlite)
 
   @property
   def database_config(self) -> dict[str, str | int]:
@@ -151,11 +171,16 @@ class Base(DeclarativeBase):
 
 
 settings = get_settings()
-engine = create_engine(
-  settings.database_url,
-  pool_pre_ping=True,
-  future=True,
-)
+engine_kwargs = {
+  'future': True,
+}
+
+if settings.database_url.startswith('sqlite:///'):
+  engine_kwargs['connect_args'] = {'check_same_thread': False}
+else:
+  engine_kwargs['pool_pre_ping'] = True
+
+engine = create_engine(settings.database_url, **engine_kwargs)
 SessionLocal = sessionmaker(
   bind=engine,
   autoflush=False,
@@ -320,6 +345,9 @@ def _is_railway_environment() -> bool:
 
 
 def _ensure_database_exists() -> None:
+  if engine.dialect.name == 'sqlite':
+    return
+
   if settings.is_managed_database:
     return
 
@@ -384,6 +412,9 @@ def _is_schema_legacy(table_columns: dict[str, set[str]]) -> bool:
 
 
 def _ensure_no_legacy_schema() -> None:
+  if engine.dialect.name != 'mysql':
+    return
+
   inspector = inspect(engine)
   table_names = set(inspector.get_table_names())
 
@@ -473,6 +504,9 @@ def _ensure_foreign_key_exists(
 
 
 def _ensure_slot_schema() -> None:
+  if engine.dialect.name != 'mysql':
+    return
+
   inspector = inspect(engine)
   table_names = set(inspector.get_table_names())
 
@@ -551,6 +585,9 @@ def _ensure_slot_schema() -> None:
 
 
 def _ensure_member_profile_schema() -> None:
+  if engine.dialect.name != 'mysql':
+    return
+
   inspector = inspect(engine)
   table_names = set(inspector.get_table_names())
 
@@ -725,6 +762,9 @@ def _ensure_member_profile_schema() -> None:
 
 
 def _ensure_query_performance_indexes() -> None:
+  if engine.dialect.name != 'mysql':
+    return
+
   inspector = inspect(engine)
   _ensure_index_exists(
     inspector,
@@ -789,6 +829,9 @@ def _ensure_query_performance_indexes() -> None:
 
 
 def _ensure_runtime_compatible_schema() -> None:
+  if engine.dialect.name != 'mysql':
+    return
+
   inspector = inspect(engine)
 
   if 'face_embeddings' not in inspector.get_table_names():

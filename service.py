@@ -17,7 +17,7 @@ from typing import Any
 from urllib import error as urllib_error
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
 from sqlalchemy import func, or_, select
@@ -122,7 +122,10 @@ MEMBERSHIP_VISIT_LIMITS = {
   'Half-Yearly': 180,
   'Yearly': 365,
 }
-CLUB_TIMEZONE = ZoneInfo('Asia/Kolkata')
+try:
+  CLUB_TIMEZONE = ZoneInfo('Asia/Kolkata')
+except ZoneInfoNotFoundError:
+  CLUB_TIMEZONE = timezone(timedelta(hours=5, minutes=30))
 RECENT_SCAN_EVENTS: deque[dict[str, Any]] = deque(maxlen=12)
 ELEVENLABS_MODEL_ID = 'eleven_multilingual_v2'
 DEFAULT_VOICE_ID = 'pNInz6obpgDQGcFmaJgB'

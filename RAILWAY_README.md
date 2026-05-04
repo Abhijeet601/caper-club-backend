@@ -12,6 +12,8 @@ Set the following environment variable in your Railway deployment:
 
 ```bash
 CAPERCLUB_DATABASE_URL=mysql://your_railway_connection_string_here
+CAPERCLUB_DOOR_LOCK_API_KEY=replace-with-a-long-random-secret
+DOOR_LOCK_DELAY_SECONDS=5
 ```
 
 ### Local Development
@@ -30,6 +32,24 @@ The backend is designed to run on Railway with the following configuration:
 - **Environment**: Production
 - **Build Command**: `pip install -r requirements.txt`
 - **Start Command**: `uvicorn backend.main:app --host 0.0.0.0 --port $PORT`
+
+## Smart Door Lock
+
+The smart lock flow is:
+
+1. Browser face recognition posts authenticated detection results to `/door/detection`
+2. Backend writes the latest `LOCK` or `UNLOCK` command into MySQL
+3. ESP32 polls `GET /door/status` with the `X-Door-Key` header
+4. Relay changes the NC lock state based on the command
+
+Endpoints:
+
+- `GET /door/status` requires `X-Door-Key`
+- `POST /door/unlock` requires `X-Door-Key`
+- `POST /door/lock` requires `X-Door-Key`
+- `GET /door/state` is for authenticated admin UI status only
+
+Do not expose `CAPERCLUB_DOOR_LOCK_API_KEY` in frontend JavaScript.
 
 ### Important Notes
 

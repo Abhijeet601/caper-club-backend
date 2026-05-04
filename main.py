@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 if __package__:
   from .db import SessionLocal, get_db, get_settings, initialize_database
   from .door_control import sync_door_for_detection
+  from .door_lock_service import get_door_state
   from .door_lock_routes import router as door_lock_router
   from .models import User, UserRole
 
@@ -86,6 +87,7 @@ if __package__:
 else:
   from db import SessionLocal, get_db, get_settings, initialize_database
   from door_control import sync_door_for_detection
+  from door_lock_service import get_door_state
   from door_lock_routes import router as door_lock_router
   from models import User, UserRole
   from schemas import (
@@ -505,6 +507,11 @@ def door_detection(
     name=name,
     force_lock=force_lock,
   )
+
+
+@app.get('/door/state')
+def door_state(_: User = Depends(get_current_admin)) -> dict[str, Any]:
+  return get_door_state()
 
 
 @app.post('/session/start')
