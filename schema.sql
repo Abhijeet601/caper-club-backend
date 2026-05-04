@@ -144,3 +144,16 @@ CREATE TABLE IF NOT EXISTS notifications (
     CONSTRAINT fk_notifications_user_id
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Smart Door Lock state table (single-row, polled by ESP32)
+CREATE TABLE IF NOT EXISTS door_status (
+    id          INT         NOT NULL DEFAULT 1,
+    command     VARCHAR(10) NOT NULL DEFAULT 'LOCK',
+    updated_at  DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP
+                            ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    CONSTRAINT chk_door_id CHECK (id = 1)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Seed the single row (safe to run multiple times)
+INSERT IGNORE INTO door_status (id, command) VALUES (1, 'LOCK');

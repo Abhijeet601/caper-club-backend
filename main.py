@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import jwt
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
@@ -24,6 +25,8 @@ from sqlalchemy.orm import Session
 
 if __package__:
   from .db import SessionLocal, get_db, get_settings, initialize_database
+  from .door_control import sync_door_for_detection
+  from .door_lock_routes import router as door_lock_router
   from .models import User, UserRole
 
   from .schemas import (
@@ -82,6 +85,8 @@ if __package__:
   )
 else:
   from db import SessionLocal, get_db, get_settings, initialize_database
+  from door_control import sync_door_for_detection
+  from door_lock_routes import router as door_lock_router
   from models import User, UserRole
   from schemas import (
 
@@ -164,6 +169,9 @@ app.add_middleware(
   allow_methods=['*'],
   allow_headers=['*'],
 )
+
+# Mount smart door lock router (POST /door/unlock, POST /door/lock, GET /door/status)
+app.include_router(door_lock_router)
 
 
 def _resolve_user(
@@ -474,7 +482,29 @@ def attendance_mark(
   _: User = Depends(get_current_admin),
   db: Session = Depends(get_db),
 ) -> dict:
-  return mark_attendance(db, input_data)
+  result = mark_attendance(db, input_data)
+  status = str(result.get('status') or '').lower()
+  sync_door_for_detection(
+    known_face=status not in {'unknown', 'retry', 'denied'},
+    name=result.get('name'),
+  )
+  return result
+
+
+@app.post('/door/detection')
+def door_detection(
+  payload: dict[str, Any],
+  _: User = Depends(get_current_admin),
+) -> dict[str, Any]:
+  status = str(payload.get('status') or '').lower()
+  known_face = bool(payload.get('knownFace')) and status not in {'unknown', 'retry', 'denied'}
+  force_lock = bool(payload.get('forceLock')) or not known_face
+  name = payload.get('name') if isinstance(payload.get('name'), str) else None
+  return sync_door_for_detection(
+    known_face=known_face,
+    name=name,
+    force_lock=force_lock,
+  )
 
 
 @app.post('/session/start')
