@@ -18,7 +18,7 @@ import jwt
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
@@ -163,7 +163,12 @@ async def lifespan(_: FastAPI):
   yield
 
 
-app = FastAPI(title='CaperClub API', lifespan=lifespan)
+app = FastAPI(
+  title='CaperClub API',
+  lifespan=lifespan,
+  docs_url='/docs',
+  redoc_url='/redoc',
+)
 app.add_middleware(
   CORSMiddleware,
   allow_origins=['*'],  # Allow all for demo
@@ -246,6 +251,11 @@ async def handle_unexpected_error(_: Request, error: Exception) -> JSONResponse:
 @app.get('/health')
 def health_check() -> dict[str, bool]:
   return {'ok': True}
+
+
+@app.get('/swagger', include_in_schema=False)
+def swagger_redirect() -> RedirectResponse:
+  return RedirectResponse(url='/docs')
 
 
 @app.post('/login')
