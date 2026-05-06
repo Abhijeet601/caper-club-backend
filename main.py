@@ -172,8 +172,15 @@ app.add_middleware(
   allow_origins=settings.cors_origin_list,
   allow_origin_regex=settings.cors_origin_regex,
   allow_credentials=True,
-  allow_methods=['*'],
-  allow_headers=['*'],
+  allow_methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allow_headers=[
+    'Accept',
+    'Authorization',
+    'Content-Type',
+    'Origin',
+    'X-Requested-With',
+    'X-Door-Key',
+  ],
 )
 
 # Mount smart door lock router (POST /door/unlock, POST /door/lock, GET /door/status)
@@ -485,7 +492,6 @@ def user_notifications(
 @app.post('/access/scan')
 def access_scan(
   input_data: AccessScanInput,
-  _: User = Depends(get_current_admin),
   db: Session = Depends(get_db),
 ) -> dict:
   return perform_access_scan(db, input_data)
