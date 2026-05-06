@@ -76,10 +76,12 @@ class Settings(BaseSettings):
       'CAPERCLUB_FRONTEND_ORIGIN',
       'FRONTEND_ORIGIN',
       'VERCEL_FRONTEND_URL',
+      'RAILWAY_PUBLIC_DOMAIN',
+      'RAILWAY_PUBLIC_URL',
     ),
   )
   cors_origin_regex: str = (
-    r'^https?://((localhost|127\.0\.0\.1)(:\d+)?|[a-z0-9-]+\.trycloudflare\.com|[a-z0-9-]+\.vercel\.app)$'
+    r'^https?://((localhost|127\.0\.0\.1)(:\d+)?|[a-z0-9-]+\.trycloudflare\.com|[a-z0-9-]+\.vercel\.app|[a-z0-9-]+\.up\.railway\.app)$'
   )
   local_sqlite_path: str = str(BACKEND_DIR / 'data' / 'caperclub.dev.db')
   prefer_local_sqlite: bool = Field(
