@@ -65,9 +65,9 @@ class Settings(BaseSettings):
   jwt_algorithm: str = 'HS256'
   access_token_expiry_minutes: int = 12 * 60
   cors_origin: str = 'http://localhost:5173'
-  cors_origins: str = ''
+  cors_origins: str = 'https://caper-club-mis.vercel.app'
   cors_origin_regex: str = (
-    r'^https?://((localhost|127\.0\.0\.1)(:\d+)?|[a-z0-9-]+\.trycloudflare\.com)$'
+    r'^https?://((localhost|127\.0\.0\.1)(:\d+)?|[a-z0-9-]+\.trycloudflare\.com|[a-z0-9-]+\.vercel\.app)$'
   )
   local_sqlite_path: str = str(BACKEND_DIR / 'data' / 'caperclub.dev.db')
   prefer_local_sqlite: bool = Field(
