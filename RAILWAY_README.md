@@ -22,7 +22,7 @@ For local development, you must still use the Railway database. Local MySQL is n
 
 1. Copy `.env.example` to `.env`
 2. Set `CAPERCLUB_DATABASE_URL` to your Railway database connection string
-3. Run the backend: `uvicorn backend.main:app --reload --port 8001`
+3. Run the backend: `uvicorn main:app --reload --port 8000`
 
 ### Deployment
 
@@ -31,7 +31,7 @@ The backend is designed to run on Railway with the following configuration:
 - **Database**: Railway MySQL (always)
 - **Environment**: Production
 - **Build Command**: `pip install -r requirements.txt`
-- **Start Command**: `uvicorn backend.main:app --host 0.0.0.0 --port $PORT`
+- **Start Command**: `uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}`
 
 ## Smart Door Lock
 
