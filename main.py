@@ -25,12 +25,13 @@ from sqlalchemy.orm import Session
 
 if __package__:
   from .db import SessionLocal, get_db, get_settings, initialize_database
-  from .door_control import sync_door_for_detection
+  from .door_control import lock_door, sync_door_for_detection
   from .door_lock_service import get_door_state
   from .door_lock_routes import router as door_lock_router
   from .models import User, UserRole
 
   from .schemas import (
+    AccessScanInput,
     AttendanceInput,
     CreateAnnouncementInput,
     CreateMembershipInput,
@@ -77,6 +78,7 @@ if __package__:
     get_user_profile,
     get_user_report,
     mark_attendance,
+    perform_access_scan,
     register_user,
     save_user_embeddings,
     seed_database,
@@ -86,12 +88,12 @@ if __package__:
   )
 else:
   from db import SessionLocal, get_db, get_settings, initialize_database
-  from door_control import sync_door_for_detection
+  from door_control import lock_door, sync_door_for_detection
   from door_lock_service import get_door_state
   from door_lock_routes import router as door_lock_router
   from models import User, UserRole
   from schemas import (
-
+    AccessScanInput,
     AttendanceInput,
     CreateAnnouncementInput,
     CreateMembershipInput,
@@ -137,6 +139,7 @@ else:
     get_user_profile,
     get_user_report,
     mark_attendance,
+    perform_access_scan,
     register_user,
     save_user_embeddings,
     seed_database,
@@ -479,8 +482,12 @@ def user_notifications(
 
 
 @app.post('/access/scan')
-def access_scan(_: User = Depends(get_current_admin)) -> dict:
-  raise ApiError('Legacy image-based scanning is disabled. Use browser recognition and POST /attendance.', 410)
+def access_scan(
+  input_data: AccessScanInput,
+  _: User = Depends(get_current_admin),
+  db: Session = Depends(get_db),
+) -> dict:
+  return perform_access_scan(db, input_data)
 
 
 @app.post('/attendance')
@@ -517,6 +524,14 @@ def door_detection(
 @app.get('/door/state')
 def door_state(_: User = Depends(get_current_admin)) -> dict[str, Any]:
   return get_door_state()
+
+
+@app.post('/door/manual-lock')
+def admin_door_lock(
+  payload: dict[str, Any] | None = None,
+  _: User = Depends(get_current_admin),
+) -> dict[str, Any]:
+  return lock_door(force=bool((payload or {}).get('force')))
 
 
 @app.post('/session/start')
