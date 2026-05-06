@@ -592,7 +592,6 @@ if FRONTEND_DIR.exists():
   app.mount('/app', StaticFiles(directory=FRONTEND_DIR, html=True), name='frontend')
 
 
-
 if __name__ == "__main__":
   import os
   import uvicorn
