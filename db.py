@@ -64,6 +64,10 @@ class Settings(BaseSettings):
   jwt_secret: str = 'caperclub-dev-secret-key-2026-rotate'
   jwt_algorithm: str = 'HS256'
   access_token_expiry_minutes: int = 12 * 60
+  serve_frontend: bool = Field(
+    default=False,
+    validation_alias=AliasChoices('CAPERCLUB_SERVE_FRONTEND', 'SERVE_FRONTEND'),
+  )
   cors_origin: str = 'http://localhost:5173'
   cors_origins: str = 'https://caper-club-mis.vercel.app'
   frontend_origin_value: str = Field(

@@ -250,7 +250,7 @@ async def handle_validation_error(_: Request, error: RequestValidationError) -> 
 
 @app.exception_handler(Exception)
 async def handle_unexpected_error(_: Request, error: Exception) -> JSONResponse:
-  logger.exception('Unhandled backend error', exc_info=error)
+  logger.exception('Unhandled backend error')
   return JSONResponse(
     status_code=500,
     content={'message': str(error) or 'Unexpected server error.'},
@@ -618,7 +618,7 @@ def session_end(
   return end_session(db, input_data)
 
 
-if FRONTEND_DIR.exists():
+if settings.serve_frontend and FRONTEND_DIR.exists():
   app.mount('/', StaticFiles(directory=FRONTEND_DIR, html=True), name='frontend')
 
 
