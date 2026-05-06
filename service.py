@@ -23,6 +23,65 @@ import numpy as np
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, load_only, selectinload
 
+# Ensure face_recognition/dlib can find bundled offline model files.
+# This avoids slow first-run downloads/cold-start delays when running the backend.
+MODELS_DIR = Path(os.getenv('CAPPERCLUB_FACE_MODELS_DIR', '')).expanduser().resolve() if os.getenv('CAPPERCLUB_FACE_MODELS_DIR') else Path()
+
+# Determine bundled model directory robustly for both local runs and Docker.
+# NOTE: MODELS_DIR may be '.' which is a valid Path but probably not the correct folder.
+# So we treat '.' (repo root) as a non-solution and re-detect.
+if (not MODELS_DIR) or str(MODELS_DIR) in {'.', ''}:
+
+  candidates = []
+
+  # If Docker copied weights, WORKDIR is /app and we copied models to /app/models.
+  candidates.append(Path.cwd() / 'models')
+
+  # In repo dev, Frontend/models is in repo root: ./Frontend/models
+  # When running from repo root, use cwd.
+  candidates.append(Path.cwd() / 'Frontend' / 'models')
+
+  # Also try paths relative to this file.
+  candidates.append(Path(__file__).resolve().parent.parent / 'Frontend' / 'models')
+  candidates.append(Path(__file__).resolve().parent.parent / 'models')
+  candidates.append(Path(__file__).resolve().parent / 'models')
+
+
+  for candidate in candidates:
+    if candidate.exists() and candidate.is_dir():
+      MODELS_DIR = candidate
+      break
+
+
+
+# Common dlib/face_recognition environment hooks.
+# (If a hook is unused by the installed dlib version, it is harmless.)
+os.environ.setdefault('DLIB_MODEL_PATH', str(MODELS_DIR))
+os.environ.setdefault('FACE_RECOGNITION_MODELS_PATH', str(MODELS_DIR))
+os.environ.setdefault('CAPPERCLUB_FACE_MODELS_DIR', str(MODELS_DIR))
+
+_REQUIRED_MODEL_FILES = [
+  'tiny_face_detector_model-shard1',
+  'face_landmark_68_model-shard1',
+  'face_recognition_model-shard1',
+  'face_recognition_model-shard2',
+]
+
+_missing = [name for name in _REQUIRED_MODEL_FILES if not (MODELS_DIR / name).exists()]
+if _missing:
+  # Don't fail hard at import-time. Missing weights will be detected on first scan.
+  # This prevents breaking non-face parts of the backend.
+  import logging
+
+  logging.getLogger(__name__).warning(
+    'Face recognition offline model files are missing. '
+    'Scans will fail until you fix model bundling. '
+    f'MODELS_DIR={MODELS_DIR} missing={_missing}'
+  )
+
+
+
+
 if __package__:
   from .db import get_settings
   from .media_storage import MediaStorage

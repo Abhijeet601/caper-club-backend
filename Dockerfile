@@ -21,7 +21,12 @@ COPY requirements.txt .
 RUN pip install --upgrade pip setuptools wheel && \
     pip install -r requirements.txt
 
+# Bundle browser face-recognition model weights so dlib/face_recognition run fully offline
+COPY Frontend/models ./models
+
 COPY . .
+
+
 
 EXPOSE 8080
 
