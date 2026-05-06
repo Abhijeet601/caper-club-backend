@@ -168,7 +168,13 @@ async def lifespan(_: FastAPI):
   yield
 
 
-app = FastAPI(title='CaperClub API', lifespan=lifespan)
+app = FastAPI(
+  title='CaperClub API',
+  lifespan=lifespan,
+  docs_url='/docs',
+  redoc_url='/redoc',
+  openapi_url='/openapi.json',
+)
 app.add_middleware(
   CORSMiddleware,
   allow_origins=settings.cors_origin_list,
