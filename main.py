@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 
 if __package__:
   from .db import SessionLocal, get_db, get_settings, initialize_database
-  from .door_control import lock_door, sync_door_for_detection
+  from .door_control import lock_door, sync_door_for_detection, unlock_door
   from .door_lock_service import get_door_state
   from .door_lock_routes import router as door_lock_router
   from .models import User, UserRole
@@ -88,7 +88,7 @@ if __package__:
   )
 else:
   from db import SessionLocal, get_db, get_settings, initialize_database
-  from door_control import lock_door, sync_door_for_detection
+  from door_control import lock_door, sync_door_for_detection, unlock_door
   from door_lock_service import get_door_state
   from door_lock_routes import router as door_lock_router
   from models import User, UserRole
@@ -532,6 +532,11 @@ def admin_door_lock(
   _: User = Depends(get_current_admin),
 ) -> dict[str, Any]:
   return lock_door(force=bool((payload or {}).get('force')))
+
+
+@app.post('/door/manual-unlock')
+def admin_door_unlock(_: User = Depends(get_current_admin)) -> dict[str, Any]:
+  return unlock_door()
 
 
 @app.post('/session/start')
