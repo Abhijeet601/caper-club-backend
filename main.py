@@ -589,7 +589,7 @@ def session_end(
 
 
 if FRONTEND_DIR.exists():
-  app.mount('/', StaticFiles(directory=FRONTEND_DIR, html=True), name='frontend')
+  app.mount('/app', StaticFiles(directory=FRONTEND_DIR, html=True), name='frontend')
 
 
 
