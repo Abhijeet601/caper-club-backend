@@ -66,6 +66,14 @@ class Settings(BaseSettings):
   access_token_expiry_minutes: int = 12 * 60
   cors_origin: str = 'http://localhost:5173'
   cors_origins: str = 'https://caper-club-mis.vercel.app'
+  frontend_origin_value: str = Field(
+    default='',
+    validation_alias=AliasChoices(
+      'CAPERCLUB_FRONTEND_ORIGIN',
+      'FRONTEND_ORIGIN',
+      'VERCEL_FRONTEND_URL',
+    ),
+  )
   cors_origin_regex: str = (
     r'^https?://((localhost|127\.0\.0\.1)(:\d+)?|[a-z0-9-]+\.trycloudflare\.com|[a-z0-9-]+\.vercel\.app)$'
   )
@@ -123,7 +131,11 @@ class Settings(BaseSettings):
 
   @property
   def cors_origin_list(self) -> list[str]:
-    configured_origins = f'{self.cors_origin},{self.cors_origins}'
+    configured_origins = ','.join(filter(None, [
+      self.cors_origin,
+      self.cors_origins,
+      self.frontend_origin_value.strip(),
+    ]))
     origins = [origin.strip() for origin in configured_origins.split(',') if origin.strip()]
     return list(dict.fromkeys(origins))
 

@@ -149,6 +149,18 @@ class ApiError(Exception):
     self.status_code = status_code
 
 
+def _require_face_recognition_module():
+  try:
+    import face_recognition  # type: ignore
+  except Exception as error:  # noqa: BLE001
+    raise ApiError(
+      'Face recognition service is unavailable on the server. Check the deployment dependencies.',
+      503,
+    ) from error
+
+  return face_recognition
+
+
 def _safe_json_loads(value: str) -> dict[str, Any] | None:
   try:
     parsed = json.loads(value)
@@ -1309,21 +1321,27 @@ def _normalize_face_box(
 def _extract_face_encoding(
   image_bytes: bytes,
 ) -> tuple[np.ndarray | None, dict[str, float] | None, str | None]:
-  import face_recognition
+  face_recognition = _require_face_recognition_module()
 
   try:
     image = _load_rgb_image(image_bytes)
   except Exception as error:  # noqa: BLE001
     raise ApiError('Unable to read image payload.', 400) from error
 
-  locations = face_recognition.face_locations(image, model='hog')
+  try:
+    locations = face_recognition.face_locations(image, model='hog')
+  except Exception as error:  # noqa: BLE001
+    raise ApiError('Face detection failed on the server. Check the deployment logs.', 503) from error
 
   if not locations:
     return None, None, 'No face detected. Align your face and try again.'
 
   location = _largest_face_location(locations)
-  encodings = face_recognition.face_encodings(image, [location])
-  box = _normalize_face_box(location, width=image.shape[1], height=image.shape[0])
+  try:
+    encodings = face_recognition.face_encodings(image, [location])
+    box = _normalize_face_box(location, width=image.shape[1], height=image.shape[0])
+  except Exception as error:  # noqa: BLE001
+    raise ApiError('Face encoding failed on the server. Check the deployment logs.', 503) from error
 
   if not encodings:
     return None, box, 'Face detected, but encoding failed. Try again.'
@@ -2489,7 +2507,7 @@ def _find_best_user_match(
   db: Session,
   probe_encoding: np.ndarray,
 ) -> tuple[User | None, float]:
-  import face_recognition
+  face_recognition = _require_face_recognition_module()
 
   users = db.scalars(
     select(User)
@@ -2514,7 +2532,10 @@ def _find_best_user_match(
     ]
     if not known_encodings:
       continue
-    distances = face_recognition.face_distance(known_encodings, probe_encoding)
+    try:
+      distances = face_recognition.face_distance(known_encodings, probe_encoding)
+    except Exception as error:  # noqa: BLE001
+      raise ApiError('Face matching failed on the server. Check the deployment logs.', 503) from error
     if len(distances) == 0:
       continue
 

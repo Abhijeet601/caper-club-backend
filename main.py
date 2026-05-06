@@ -11,6 +11,7 @@ ALWAYS USE RAILWAY DATABASE
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -151,6 +152,7 @@ else:
 settings = get_settings()
 bearer_scheme = HTTPBearer(auto_error=False)
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / 'Frontend'
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -248,6 +250,7 @@ async def handle_validation_error(_: Request, error: RequestValidationError) -> 
 
 @app.exception_handler(Exception)
 async def handle_unexpected_error(_: Request, error: Exception) -> JSONResponse:
+  logger.exception('Unhandled backend error', exc_info=error)
   return JSONResponse(
     status_code=500,
     content={'message': str(error) or 'Unexpected server error.'},
