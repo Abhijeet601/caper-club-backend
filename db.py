@@ -64,24 +64,10 @@ class Settings(BaseSettings):
   jwt_secret: str = 'caperclub-dev-secret-key-2026-rotate'
   jwt_algorithm: str = 'HS256'
   access_token_expiry_minutes: int = 12 * 60
-  serve_frontend: bool = Field(
-    default=False,
-    validation_alias=AliasChoices('CAPERCLUB_SERVE_FRONTEND', 'SERVE_FRONTEND'),
-  )
   cors_origin: str = 'http://localhost:5173'
-  cors_origins: str = 'https://caper-club-mis.vercel.app'
-  frontend_origin_value: str = Field(
-    default='',
-    validation_alias=AliasChoices(
-      'CAPERCLUB_FRONTEND_ORIGIN',
-      'FRONTEND_ORIGIN',
-      'VERCEL_FRONTEND_URL',
-      'RAILWAY_PUBLIC_DOMAIN',
-      'RAILWAY_PUBLIC_URL',
-    ),
-  )
+  cors_origins: str = ''
   cors_origin_regex: str = (
-    r'^https?://((localhost|127\.0\.0\.1)(:\d+)?|[a-z0-9-]+\.trycloudflare\.com|[a-z0-9-]+\.vercel\.app|[a-z0-9-]+\.up\.railway\.app)$'
+    r'^https?://((localhost|127\.0\.0\.1)(:\d+)?|[a-z0-9-]+\.trycloudflare\.com)$'
   )
   local_sqlite_path: str = str(BACKEND_DIR / 'data' / 'caperclub.dev.db')
   prefer_local_sqlite: bool = Field(
@@ -137,11 +123,7 @@ class Settings(BaseSettings):
 
   @property
   def cors_origin_list(self) -> list[str]:
-    configured_origins = ','.join(filter(None, [
-      self.cors_origin,
-      self.cors_origins,
-      self.frontend_origin_value.strip(),
-    ]))
+    configured_origins = f'{self.cors_origin},{self.cors_origins}'
     origins = [origin.strip() for origin in configured_origins.split(',') if origin.strip()]
     return list(dict.fromkeys(origins))
 

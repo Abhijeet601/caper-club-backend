@@ -11,7 +11,6 @@ ALWAYS USE RAILWAY DATABASE
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-import logging
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +25,7 @@ from sqlalchemy.orm import Session
 
 if __package__:
   from .db import SessionLocal, get_db, get_settings, initialize_database
-  from .door_control import lock_door, sync_door_for_detection, unlock_door
+  from .door_control import lock_door, sync_door_for_detection
   from .door_lock_service import get_door_state
   from .door_lock_routes import router as door_lock_router
   from .models import User, UserRole
@@ -89,7 +88,7 @@ if __package__:
   )
 else:
   from db import SessionLocal, get_db, get_settings, initialize_database
-  from door_control import lock_door, sync_door_for_detection, unlock_door
+  from door_control import lock_door, sync_door_for_detection
   from door_lock_service import get_door_state
   from door_lock_routes import router as door_lock_router
   from models import User, UserRole
@@ -152,7 +151,6 @@ else:
 settings = get_settings()
 bearer_scheme = HTTPBearer(auto_error=False)
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / 'Frontend'
-logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -168,27 +166,13 @@ async def lifespan(_: FastAPI):
   yield
 
 
-app = FastAPI(
-  title='CaperClub API',
-  lifespan=lifespan,
-  docs_url='/docs',
-  redoc_url='/redoc',
-  openapi_url='/openapi.json',
-)
+app = FastAPI(title='CaperClub API', lifespan=lifespan)
 app.add_middleware(
   CORSMiddleware,
-  allow_origins=settings.cors_origin_list,
-  allow_origin_regex=settings.cors_origin_regex,
+  allow_origins=['*'],  # Allow all for demo
   allow_credentials=True,
-  allow_methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allow_headers=[
-    'Accept',
-    'Authorization',
-    'Content-Type',
-    'Origin',
-    'X-Requested-With',
-    'X-Door-Key',
-  ],
+  allow_methods=['*'],
+  allow_headers=['*'],
 )
 
 # Mount smart door lock router (POST /door/unlock, POST /door/lock, GET /door/status)
@@ -256,7 +240,6 @@ async def handle_validation_error(_: Request, error: RequestValidationError) -> 
 
 @app.exception_handler(Exception)
 async def handle_unexpected_error(_: Request, error: Exception) -> JSONResponse:
-  logger.exception('Unhandled backend error')
   return JSONResponse(
     status_code=500,
     content={'message': str(error) or 'Unexpected server error.'},
@@ -501,6 +484,7 @@ def user_notifications(
 @app.post('/access/scan')
 def access_scan(
   input_data: AccessScanInput,
+  _: User = Depends(get_current_admin),
   db: Session = Depends(get_db),
 ) -> dict:
   return perform_access_scan(db, input_data)
@@ -548,11 +532,6 @@ def admin_door_lock(
   _: User = Depends(get_current_admin),
 ) -> dict[str, Any]:
   return lock_door(force=bool((payload or {}).get('force')))
-
-
-@app.post('/door/manual-unlock')
-def admin_door_unlock(_: User = Depends(get_current_admin)) -> dict[str, Any]:
-  return unlock_door()
 
 
 @app.post('/session/start')
@@ -624,7 +603,7 @@ def session_end(
   return end_session(db, input_data)
 
 
-if settings.serve_frontend and FRONTEND_DIR.exists():
+if FRONTEND_DIR.exists():
   app.mount('/', StaticFiles(directory=FRONTEND_DIR, html=True), name='frontend')
 
 
@@ -632,4 +611,4 @@ if settings.serve_frontend and FRONTEND_DIR.exists():
 if __name__ == "__main__":
   import os
   import uvicorn
-  uvicorn.run(app, host="0.0.0.0", port=int(os.getenv('PORT', '8000')))
+  uvicorn.run(app, host="0.0.0.0", port=int(os.getenv('PORT', '8001')))
