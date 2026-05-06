@@ -12,7 +12,7 @@ Set the following environment variable in your Railway deployment:
 
 ```bash
 CAPERCLUB_DATABASE_URL=mysql://your_railway_connection_string_here
-CAPERCLUB_DOOR_LOCK_API_KEY = caperclub-door-2026
+CAPERCLUB_DOOR_LOCK_API_KEY=replace-with-a-long-random-secret
 DOOR_LOCK_DELAY_SECONDS=5
 ```
 
