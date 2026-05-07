@@ -25,8 +25,7 @@ from sqlalchemy.orm import Session
 
 if __package__:
   from .db import SessionLocal, get_db, get_settings, initialize_database
-  from .door_control import lock_door, sync_door_for_detection
-  from .door_lock_service import get_door_state
+  from .door_control import get_door_control_state, sync_door_for_detection, unlock_door
   from .door_lock_routes import router as door_lock_router
   from .models import User, UserRole
 
@@ -88,8 +87,7 @@ if __package__:
   )
 else:
   from db import SessionLocal, get_db, get_settings, initialize_database
-  from door_control import lock_door, sync_door_for_detection
-  from door_lock_service import get_door_state
+  from door_control import get_door_control_state, sync_door_for_detection, unlock_door
   from door_lock_routes import router as door_lock_router
   from models import User, UserRole
   from schemas import (
@@ -184,7 +182,7 @@ app.add_middleware(
 )
 
 
-# Mount smart door lock router (POST /door/unlock, POST /door/lock, GET /door/status)
+# Mount ESP32 door polling routes secured with X-Door-Key.
 app.include_router(door_lock_router)
 
 
@@ -537,15 +535,14 @@ def door_detection(
 
 @app.get('/door/state')
 def door_state(_: User = Depends(get_current_admin)) -> dict[str, Any]:
-  return get_door_state()
+  return get_door_control_state()
 
 
-@app.post('/door/manual-lock')
-def admin_door_lock(
-  payload: dict[str, Any] | None = None,
+@app.post('/door/manual-unlock')
+def admin_door_unlock(
   _: User = Depends(get_current_admin),
 ) -> dict[str, Any]:
-  return lock_door(force=bool((payload or {}).get('force')))
+  return unlock_door()
 
 
 @app.post('/session/start')
