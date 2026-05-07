@@ -232,6 +232,15 @@ _user_embeddings_cache_lock = Lock()
 _user_embeddings_cache_payload: list[dict[str, Any]] | None = None
 _user_embeddings_cache_at = 0.0
 
+# Matching cache (numpy encodings) to avoid bytes->numpy decoding + per-scan DB hydration.
+# Built from enrolled users only and used by _find_best_user_match().
+_match_cache_lock = Lock()
+_match_cache_at = 0.0
+_match_cache_ttl_seconds = USER_EMBEDDINGS_CACHE_TTL_SECONDS  # reuse TTL
+_match_cache_user_ids: list[str] | None = None
+_match_cache_encodings_by_user: dict[str, list[np.ndarray]] | None = None
+_match_cache_centroid_by_user: dict[str, np.ndarray] | None = None
+
 
 class ApiError(Exception):
   def __init__(self, message: str, status_code: int = 400) -> None:
@@ -1494,10 +1503,11 @@ def _validate_face_quality(
 
 def _extract_face_encoding(
   image_bytes: bytes,
+  *,
+  live_mode: bool = False,
 ) -> tuple[np.ndarray | None, dict[str, float] | None, str | None]:
   _ensure_face_models_available()
   import face_recognition
-
 
   try:
     image = _load_rgb_image(image_bytes)
@@ -1505,20 +1515,35 @@ def _extract_face_encoding(
     raise ApiError('Unable to read image payload.', 400) from error
 
   prepared_image = _prepare_face_image(image)
-  detection_passes = [
-    {'image': prepared_image, 'upsample': 1},
-    {'image': prepared_image, 'upsample': 2},
-  ]
+
+  # Live scanning: use cheaper detection first (fewer passes, lower upsample and jitters).
+  live_upsample_primary = int(os.getenv('CAPERCLUB_LIVE_UPSAMPLE_PRIMARY', '1'))
+  live_upsample_fallback = int(os.getenv('CAPERCLUB_LIVE_UPSAMPLE_FALLBACK', '2'))
+  live_max_passes = int(os.getenv('CAPERCLUB_LIVE_DETECTION_PASSES', '1'))  # 1=fast, 2=slower-but-safer
+
+  detection_passes: list[dict[str, Any]] = []
+  if live_mode:
+    detection_passes.append({'image': prepared_image, 'upsample': live_upsample_primary})
+    if live_max_passes >= 2:
+      detection_passes.append({'image': prepared_image, 'upsample': live_upsample_fallback})
+  else:
+    detection_passes.extend([
+      {'image': prepared_image, 'upsample': 1},
+      {'image': prepared_image, 'upsample': 2},
+    ])
+
+  # If we actually resized the image, allow an additional quick try using the original.
   if not np.array_equal(prepared_image, image):
-    detection_passes.append({'image': image, 'upsample': 1})
+    detection_passes.append({'image': image, 'upsample': int(os.getenv('CAPERCLUB_LIVE_UPSAMPLE_ORIG', '1')) if live_mode else 1})
 
   locations: list[tuple[int, int, int, int]] = []
   detection_image = prepared_image
+
   for detection_pass in detection_passes:
     trial_image = detection_pass['image']
     trial_locations = face_recognition.face_locations(
       trial_image,
-      number_of_times_to_upsample=detection_pass['upsample'],
+      number_of_times_to_upsample=int(detection_pass['upsample']),
       model=FACE_DETECTION_MODEL,
     )
     if trial_locations:
@@ -1531,6 +1556,7 @@ def _extract_face_encoding(
 
   location = _largest_face_location(locations)
   scaled_location = location
+
   if detection_image.shape[:2] != image.shape[:2]:
     scale_y = image.shape[0] / detection_image.shape[0]
     scale_x = image.shape[1] / detection_image.shape[1]
@@ -1541,6 +1567,7 @@ def _extract_face_encoding(
       int(round(bottom * scale_y)),
       int(round(left * scale_x)),
     )
+
   box = _normalize_face_box(scaled_location, width=image.shape[1], height=image.shape[0])
 
   if len(locations) > 1:
@@ -1550,10 +1577,11 @@ def _extract_face_encoding(
   if quality_issue:
     return None, box, quality_issue
 
+  live_jitters = int(os.getenv('CAPERCLUB_LIVE_ENCODING_JITTERS', '1' if live_mode else str(FACE_ENCODING_JITTERS)))
   encodings = face_recognition.face_encodings(
     detection_image,
     [location],
-    num_jitters=FACE_ENCODING_JITTERS,
+    num_jitters=live_jitters,
   )
 
   location = scaled_location
@@ -1636,10 +1664,18 @@ def _descriptor_centroid(encodings: list[np.ndarray]) -> list[float] | None:
 
 def _invalidate_user_embeddings_cache() -> None:
   global _user_embeddings_cache_payload, _user_embeddings_cache_at
+  global _match_cache_user_ids, _match_cache_encodings_by_user, _match_cache_centroid_by_user
+  global _match_cache_at
 
   with _user_embeddings_cache_lock:
     _user_embeddings_cache_payload = None
     _user_embeddings_cache_at = 0.0
+
+  with _match_cache_lock:
+    _match_cache_user_ids = None
+    _match_cache_encodings_by_user = None
+    _match_cache_centroid_by_user = None
+    _match_cache_at = 0.0
 
 
 def _save_user_face_image(user_id: str, image_bytes: bytes, index: int) -> str:
@@ -2712,6 +2748,59 @@ def get_user_embeddings(db: Session) -> list[dict[str, Any]]:
   return payload
 
 
+def _build_match_cache_if_needed(db: Session) -> None:
+  """Build numpy matching cache for enrolled users.
+
+  Cache includes:
+  - user_ids (order-preserving)
+  - encodings_by_user: user_id -> list[np.ndarray] (128-d)
+  - centroid_by_user: user_id -> np.ndarray (128-d)
+  """
+  global _match_cache_at, _match_cache_user_ids, _match_cache_encodings_by_user, _match_cache_centroid_by_user
+
+  now = time.monotonic()
+  with _match_cache_lock:
+    if (
+      _match_cache_user_ids is not None
+      and (now - _match_cache_at) < _match_cache_ttl_seconds
+      and _match_cache_encodings_by_user is not None
+      and _match_cache_centroid_by_user is not None
+    ):
+      return
+
+  # Load users + their embeddings once.
+  users = db.scalars(
+    select(User)
+    .options(selectinload(User.face_embeddings), selectinload(User.slot))
+    .where(User.role == UserRole.USER, User.face_images_count > 0)
+    .order_by(User.created_at.asc())
+  ).all()
+
+  encodings_by_user: dict[str, list[np.ndarray]] = {}
+  centroid_by_user: dict[str, np.ndarray] = {}
+  user_ids: list[str] = []
+
+  for user in users:
+    encodings: list[np.ndarray] = []
+    for embedding in user.face_embeddings:
+      value = _encoding_from_bytes(embedding.embedding_vector)
+      if value is not None and value.shape == (128,):
+        encodings.append(value)
+
+    if not encodings:
+      continue
+
+    user_ids.append(str(user.id))
+    encodings_by_user[str(user.id)] = encodings
+    centroid_by_user[str(user.id)] = _normalize_encoding_vector(np.mean(np.stack(encodings), axis=0))
+
+  with _match_cache_lock:
+    _match_cache_user_ids = user_ids
+    _match_cache_encodings_by_user = encodings_by_user
+    _match_cache_centroid_by_user = centroid_by_user
+    _match_cache_at = time.monotonic()
+
+
 def _find_best_user_match(
   db: Session,
   probe_encoding: np.ndarray,
@@ -2720,36 +2809,36 @@ def _find_best_user_match(
 ) -> dict[str, Any] | None:
   import face_recognition
 
-  users = db.scalars(
-    select(User)
-    .options(selectinload(User.face_embeddings), selectinload(User.slot))
-    .order_by(User.created_at.asc())
-  ).all()
+  # Ensure cache is built.
+  _build_match_cache_if_needed(db)
 
-  ranked_matches: list[dict[str, Any]] = []
+  # Snapshot cache references.
+  with _match_cache_lock:
+    user_ids = list(_match_cache_user_ids or [])
+    encodings_by_user = _match_cache_encodings_by_user or {}
+    centroid_by_user = _match_cache_centroid_by_user or {}
 
-  for user in users:
-    if not user.face_embeddings:
-      continue
+  if not user_ids:
+    return None
 
-    known_encodings = [
-      value
-      for value in (
-        _encoding_from_bytes(embedding.embedding_vector)
-        for embedding in user.face_embeddings
-      )
-      if value is not None and value.shape == probe_encoding.shape
-    ]
-    if not known_encodings:
-      continue
+  # We need:
+  # - best (may be constrained by claimed_user_id)
+  # - overall_best + runner_up (to compute separation/ambiguous logic)
+  candidates: list[dict[str, Any]] = []
 
+  def consider_candidate(user_id: str, known_encodings: list[np.ndarray]) -> dict[str, Any] | None:
     distances = face_recognition.face_distance(known_encodings, probe_encoding)
     if len(distances) == 0:
-      continue
+      return None
 
-    centroid = _normalize_encoding_vector(np.mean(np.stack(known_encodings), axis=0))
-    centroid_distance = float(face_recognition.face_distance([centroid], probe_encoding)[0])
     sorted_distances = sorted(float(value) for value in distances)
+    centroid = centroid_by_user.get(user_id)
+    centroid_distance = (
+      float(face_recognition.face_distance([centroid], probe_encoding)[0])
+      if centroid is not None
+      else float('inf')
+    )
+
     top_sample_distances = sorted_distances[: min(3, len(sorted_distances))]
     support_limit = FACE_MATCH_THRESHOLD + FACE_SUPPORT_DISTANCE_BUFFER
     support_count = sum(1 for value in sorted_distances if value <= support_limit)
@@ -2760,8 +2849,8 @@ def _find_best_user_match(
       else sorted_distances[0]
     )
 
-    ranked_matches.append({
-      'user': user,
+    return {
+      'user_id': user_id,
       'distance': sorted_distances[0],
       'centroidDistance': centroid_distance,
       'sampleMeanDistance': sample_mean_distance,
@@ -2769,31 +2858,35 @@ def _find_best_user_match(
       'requiredSupport': required_support,
       'sampleCount': len(sorted_distances),
       'hasSampleSet': len(sorted_distances) >= 3,
-    })
+    }
 
-  if not ranked_matches:
+  for user_id in user_ids:
+    known_encodings = encodings_by_user.get(str(user_id))
+    if not known_encodings:
+      continue
+
+    candidate = consider_candidate(str(user_id), known_encodings)
+    if candidate:
+      candidates.append(candidate)
+
+  if not candidates:
     return None
 
-  ranked_matches.sort(key=lambda item: item['distance'])
+  candidates.sort(key=lambda item: float(item['distance']))
+
+  overall_best = candidates[0]
+  runner_up = next((c for c in candidates if str(c['user_id']) != str(overall_best['user_id'])), None)
+
   if claimed_user_id:
     best = next(
-      (candidate for candidate in ranked_matches if str(candidate['user'].id) == str(claimed_user_id)),
+      (c for c in candidates if str(c['user_id']) == str(claimed_user_id)),
       None,
     )
     if best is None:
       return None
   else:
-    best = ranked_matches[0]
+    best = overall_best
 
-  runner_up = next(
-    (
-      candidate
-      for candidate in ranked_matches
-      if str(candidate['user'].id) != str(best['user'].id)
-    ),
-    None,
-  )
-  overall_best = ranked_matches[0]
   second_distance = float(runner_up['distance']) if runner_up else float('inf')
   margin = second_distance - float(best['distance'])
   strong_match = float(best['distance']) <= FACE_STRONG_MATCH_THRESHOLD
@@ -2805,7 +2898,7 @@ def _find_best_user_match(
   )
   centroid_supported = float(best['centroidDistance']) <= FACE_CENTROID_MATCH_THRESHOLD or strong_match
   sample_mean_supported = float(best['sampleMeanDistance']) <= FACE_SAMPLE_MEAN_THRESHOLD or strong_match
-  claim_supported = claimed_user_id is None or str(overall_best['user'].id) == str(claimed_user_id)
+  claim_supported = claimed_user_id is None or str(overall_best['user_id']) == str(claimed_user_id)
   matched = (
     float(best['distance']) <= FACE_MATCH_THRESHOLD
     and sample_supported
@@ -2829,8 +2922,17 @@ def _find_best_user_match(
   elif not strong_match and not separated:
     reason = 'ambiguous'
 
+  # Fetch the User ORM for the matched user (fast: single-row query).
+  user_row = db.scalar(
+    select(User)
+    .options(selectinload(User.slot))
+    .where(User.id == best['user_id'])
+  )
+  if user_row is None:
+    return None
+
   return {
-    'user': best['user'],
+    'user': user_row,
     'distance': round(float(best['distance']), 4),
     'centroidDistance': round(float(best['centroidDistance']), 4),
     'secondDistance': round(second_distance, 4) if np.isfinite(second_distance) else None,
@@ -3028,7 +3130,7 @@ def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
 
 def perform_access_scan(db: Session, input_data: AccessScanInput) -> dict[str, Any]:
   image_bytes = _decode_image_payload(input_data.image)
-  encoding, face_box, error_message = _extract_face_encoding(image_bytes)
+  encoding, face_box, error_message = _extract_face_encoding(image_bytes, live_mode=True)
 
   if encoding is None:
     return _build_scan_response(

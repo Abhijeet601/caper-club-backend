@@ -827,6 +827,14 @@ def _ensure_query_performance_indexes() -> None:
     create_sql='CREATE INDEX `idx_announcements_user_created_at` ON `announcements` (`user_id`, `created_at`)',
   )
 
+  # Face matching / enrollment lookups
+  _ensure_index_exists(
+    inspector,
+    table_name='face_embeddings',
+    index_name='idx_face_embeddings_user_id',
+    create_sql='CREATE INDEX `idx_face_embeddings_user_id` ON `face_embeddings` (`user_id`)',
+  )
+
 
 def _ensure_runtime_compatible_schema() -> None:
   if engine.dialect.name != 'mysql':
