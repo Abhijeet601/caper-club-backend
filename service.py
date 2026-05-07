@@ -184,11 +184,19 @@ for directory in (USER_STORAGE, SESSION_STORAGE, UNKNOWN_STORAGE):
 
 MEDIA_STORAGE = MediaStorage(get_settings(), STORAGE_ROOT)
 
-FACE_MATCH_THRESHOLD = 0.47
-FACE_RETRY_THRESHOLD = 0.58
-FACE_STRONG_MATCH_THRESHOLD = 0.42
-FACE_MIN_MATCH_MARGIN = 0.045
-FACE_SUPPORT_DISTANCE_BUFFER = 0.03
+FACE_MATCH_THRESHOLD = 0.41
+FACE_RETRY_THRESHOLD = 0.5
+FACE_STRONG_MATCH_THRESHOLD = 0.37
+FACE_CENTROID_MATCH_THRESHOLD = 0.43
+FACE_SAMPLE_MEAN_THRESHOLD = 0.43
+FACE_MIN_MATCH_MARGIN = 0.08
+FACE_SUPPORT_DISTANCE_BUFFER = 0.02
+FACE_MIN_FACE_RATIO = float(os.getenv('CAPERCLUB_FACE_MIN_FACE_RATIO', '0.16'))
+FACE_MAX_CENTER_OFFSET_X = float(os.getenv('CAPERCLUB_FACE_MAX_CENTER_OFFSET_X', '0.22'))
+FACE_MAX_CENTER_OFFSET_Y = float(os.getenv('CAPERCLUB_FACE_MAX_CENTER_OFFSET_Y', '0.24'))
+FACE_MIN_BRIGHTNESS = float(os.getenv('CAPERCLUB_FACE_MIN_BRIGHTNESS', '52'))
+FACE_MAX_BRIGHTNESS = float(os.getenv('CAPERCLUB_FACE_MAX_BRIGHTNESS', '240'))
+FACE_MIN_SHARPNESS = float(os.getenv('CAPERCLUB_FACE_MIN_SHARPNESS', '18'))
 FACE_MIN_DETECTION_EDGE = int(os.getenv('CAPERCLUB_FACE_MIN_DETECTION_EDGE', '960'))
 FACE_MAX_DETECTION_EDGE = int(os.getenv('CAPERCLUB_FACE_MAX_DETECTION_EDGE', '1600'))
 FACE_ENCODING_JITTERS = max(1, int(os.getenv('CAPERCLUB_FACE_ENCODING_JITTERS', '2')))
@@ -1332,8 +1340,17 @@ def _feed_status_from_scan_status(status: str) -> str:
 
 
 def _distance_to_confidence(distance: float) -> float:
-  scaled = max(0.0, min(1.0, 1.0 - (distance / 0.65)))
+  scaled = 1.0 - ((float(distance) - 0.24) / 0.36)
+  scaled = max(0.0, min(1.0, scaled))
   return round(scaled, 2)
+
+
+def _normalize_encoding_vector(encoding: np.ndarray) -> np.ndarray:
+  vector = np.asarray(encoding, dtype=np.float64)
+  magnitude = float(np.linalg.norm(vector))
+  if magnitude > 0:
+    vector = vector / magnitude
+  return vector
 
 
 def _decode_image_payload(image_data: str) -> bytes:
@@ -1404,6 +1421,77 @@ def _normalize_face_box(
   }
 
 
+def _face_quality_metrics(
+  image: np.ndarray,
+  location: tuple[int, int, int, int],
+) -> dict[str, float]:
+  height, width = image.shape[:2]
+  top, right, bottom, left = location
+  face_height = max(bottom - top, 1)
+  face_width = max(right - left, 1)
+  face_ratio = max(face_width / max(width, 1), face_height / max(height, 1))
+  center_x = ((left + right) / 2) / max(width, 1)
+  center_y = ((top + bottom) / 2) / max(height, 1)
+
+  crop = image[max(top, 0):max(bottom, 0), max(left, 0):max(right, 0)]
+  if crop.size == 0:
+    return {
+      'faceRatio': round(face_ratio, 4),
+      'centerOffsetX': round(abs(center_x - 0.5), 4),
+      'centerOffsetY': round(abs(center_y - 0.46), 4),
+      'brightness': 0.0,
+      'sharpness': 0.0,
+    }
+
+  gray = (
+    (crop[..., 0].astype(np.float64) * 0.299)
+    + (crop[..., 1].astype(np.float64) * 0.587)
+    + (crop[..., 2].astype(np.float64) * 0.114)
+  )
+  brightness = float(np.mean(gray))
+
+  if gray.shape[0] >= 3 and gray.shape[1] >= 3:
+    center = gray[1:-1, 1:-1]
+    laplacian = (
+      (-4.0 * center)
+      + gray[:-2, 1:-1]
+      + gray[2:, 1:-1]
+      + gray[1:-1, :-2]
+      + gray[1:-1, 2:]
+    )
+    sharpness = float(np.var(laplacian))
+  else:
+    sharpness = 0.0
+
+  return {
+    'faceRatio': round(face_ratio, 4),
+    'centerOffsetX': round(abs(center_x - 0.5), 4),
+    'centerOffsetY': round(abs(center_y - 0.46), 4),
+    'brightness': round(brightness, 2),
+    'sharpness': round(sharpness, 2),
+  }
+
+
+def _validate_face_quality(
+  image: np.ndarray,
+  location: tuple[int, int, int, int],
+) -> str | None:
+  metrics = _face_quality_metrics(image, location)
+
+  if metrics['faceRatio'] < FACE_MIN_FACE_RATIO:
+    return 'Move closer to the camera. Face area is too small for secure verification.'
+  if metrics['centerOffsetX'] > FACE_MAX_CENTER_OFFSET_X or metrics['centerOffsetY'] > FACE_MAX_CENTER_OFFSET_Y:
+    return 'Center your face inside the scanner frame and look straight ahead.'
+  if metrics['brightness'] < FACE_MIN_BRIGHTNESS:
+    return 'Lighting is too low. Move into better light and try again.'
+  if metrics['brightness'] > FACE_MAX_BRIGHTNESS:
+    return 'Lighting is too harsh. Reduce glare and try again.'
+  if metrics['sharpness'] < FACE_MIN_SHARPNESS:
+    return 'Face image is too blurry. Hold steady and try again.'
+
+  return None
+
+
 def _extract_face_encoding(
   image_bytes: bytes,
 ) -> tuple[np.ndarray | None, dict[str, float] | None, str | None]:
@@ -1442,33 +1530,43 @@ def _extract_face_encoding(
     return None, None, 'No face detected. Align your face and try again.'
 
   location = _largest_face_location(locations)
+  scaled_location = location
+  if detection_image.shape[:2] != image.shape[:2]:
+    scale_y = image.shape[0] / detection_image.shape[0]
+    scale_x = image.shape[1] / detection_image.shape[1]
+    top, right, bottom, left = location
+    scaled_location = (
+      int(round(top * scale_y)),
+      int(round(right * scale_x)),
+      int(round(bottom * scale_y)),
+      int(round(left * scale_x)),
+    )
+  box = _normalize_face_box(scaled_location, width=image.shape[1], height=image.shape[0])
+
+  if len(locations) > 1:
+    return None, box, 'Multiple faces detected. Only one face can be verified at a time.'
+
+  quality_issue = _validate_face_quality(detection_image, location)
+  if quality_issue:
+    return None, box, quality_issue
+
   encodings = face_recognition.face_encodings(
     detection_image,
     [location],
     num_jitters=FACE_ENCODING_JITTERS,
   )
 
-  if detection_image.shape[:2] != image.shape[:2]:
-    scale_y = image.shape[0] / detection_image.shape[0]
-    scale_x = image.shape[1] / detection_image.shape[1]
-    top, right, bottom, left = location
-    location = (
-      int(round(top * scale_y)),
-      int(round(right * scale_x)),
-      int(round(bottom * scale_y)),
-      int(round(left * scale_x)),
-    )
-
+  location = scaled_location
   box = _normalize_face_box(location, width=image.shape[1], height=image.shape[0])
 
   if not encodings:
     return None, box, 'Face detected, but encoding failed. Try again.'
 
-  return encodings[0], box, None
+  return _normalize_encoding_vector(encodings[0]), box, None
 
 
 def _encoding_to_bytes(encoding: np.ndarray) -> bytes:
-  return np.asarray(encoding, dtype=np.float64).tobytes()
+  return _normalize_encoding_vector(encoding).tobytes()
 
 
 def _encoding_from_bytes(raw: Any) -> np.ndarray | None:
@@ -1481,7 +1579,7 @@ def _encoding_from_bytes(raw: Any) -> np.ndarray | None:
   if isinstance(raw, (bytes, bytearray)):
     buffer = bytes(raw)
     if len(buffer) % 8 == 0:
-      return np.frombuffer(buffer, dtype=np.float64)
+      return _normalize_encoding_vector(np.frombuffer(buffer, dtype=np.float64))
 
     try:
       parsed = json.loads(buffer.decode('utf-8'))
@@ -1489,7 +1587,7 @@ def _encoding_from_bytes(raw: Any) -> np.ndarray | None:
       return None
 
     if isinstance(parsed, list):
-      return np.asarray(parsed, dtype=np.float64)
+      return _normalize_encoding_vector(np.asarray(parsed, dtype=np.float64))
 
     return None
 
@@ -1500,7 +1598,7 @@ def _encoding_from_bytes(raw: Any) -> np.ndarray | None:
       return None
 
     if isinstance(parsed, list):
-      return np.asarray(parsed, dtype=np.float64)
+      return _normalize_encoding_vector(np.asarray(parsed, dtype=np.float64))
 
   return None
 
@@ -1514,11 +1612,11 @@ def _descriptor_from_iterable(values: list[float]) -> np.ndarray:
   if descriptor.ndim != 1 or descriptor.size != 128:
     raise ApiError('Each face descriptor must contain 128 values.', 400)
 
-  return descriptor
+  return _normalize_encoding_vector(descriptor)
 
 
 def _descriptor_to_payload(encoding: np.ndarray) -> list[float]:
-  values = np.asarray(encoding, dtype=np.float64).tolist()
+  values = _normalize_encoding_vector(encoding).tolist()
   return [round(float(value), 6) for value in values]
 
 
@@ -2617,6 +2715,8 @@ def get_user_embeddings(db: Session) -> list[dict[str, Any]]:
 def _find_best_user_match(
   db: Session,
   probe_encoding: np.ndarray,
+  *,
+  claimed_user_id: str | None = None,
 ) -> dict[str, Any] | None:
   import face_recognition
 
@@ -2642,14 +2742,18 @@ def _find_best_user_match(
     ]
     if not known_encodings:
       continue
+
     distances = face_recognition.face_distance(known_encodings, probe_encoding)
     if len(distances) == 0:
       continue
 
+    centroid = _normalize_encoding_vector(np.mean(np.stack(known_encodings), axis=0))
+    centroid_distance = float(face_recognition.face_distance([centroid], probe_encoding)[0])
     sorted_distances = sorted(float(value) for value in distances)
     top_sample_distances = sorted_distances[: min(3, len(sorted_distances))]
     support_limit = FACE_MATCH_THRESHOLD + FACE_SUPPORT_DISTANCE_BUFFER
     support_count = sum(1 for value in sorted_distances if value <= support_limit)
+    required_support = 3 if len(sorted_distances) >= 5 else (2 if len(sorted_distances) >= 3 else 1)
     sample_mean_distance = (
       sum(top_sample_distances) / len(top_sample_distances)
       if top_sample_distances
@@ -2659,8 +2763,10 @@ def _find_best_user_match(
     ranked_matches.append({
       'user': user,
       'distance': sorted_distances[0],
+      'centroidDistance': centroid_distance,
       'sampleMeanDistance': sample_mean_distance,
       'supportCount': support_count,
+      'requiredSupport': required_support,
       'sampleCount': len(sorted_distances),
       'hasSampleSet': len(sorted_distances) >= 3,
     })
@@ -2669,40 +2775,69 @@ def _find_best_user_match(
     return None
 
   ranked_matches.sort(key=lambda item: item['distance'])
-  best = ranked_matches[0]
+  if claimed_user_id:
+    best = next(
+      (candidate for candidate in ranked_matches if str(candidate['user'].id) == str(claimed_user_id)),
+      None,
+    )
+    if best is None:
+      return None
+  else:
+    best = ranked_matches[0]
+
   runner_up = next(
     (
       candidate
-      for candidate in ranked_matches[1:]
+      for candidate in ranked_matches
       if str(candidate['user'].id) != str(best['user'].id)
     ),
     None,
   )
+  overall_best = ranked_matches[0]
   second_distance = float(runner_up['distance']) if runner_up else float('inf')
   margin = second_distance - float(best['distance'])
   strong_match = float(best['distance']) <= FACE_STRONG_MATCH_THRESHOLD
   separated = not np.isfinite(second_distance) or margin >= FACE_MIN_MATCH_MARGIN
-  sample_supported = (not best['hasSampleSet']) or int(best['supportCount']) >= 2 or strong_match
+  sample_supported = (
+    (not best['hasSampleSet'])
+    or int(best['supportCount']) >= int(best['requiredSupport'])
+    or strong_match
+  )
+  centroid_supported = float(best['centroidDistance']) <= FACE_CENTROID_MATCH_THRESHOLD or strong_match
+  sample_mean_supported = float(best['sampleMeanDistance']) <= FACE_SAMPLE_MEAN_THRESHOLD or strong_match
+  claim_supported = claimed_user_id is None or str(overall_best['user'].id) == str(claimed_user_id)
   matched = (
     float(best['distance']) <= FACE_MATCH_THRESHOLD
     and sample_supported
+    and centroid_supported
+    and sample_mean_supported
+    and claim_supported
     and (strong_match or separated)
   )
+
   reason = ''
   if float(best['distance']) > FACE_MATCH_THRESHOLD:
     reason = 'distance'
   elif not sample_supported:
     reason = 'sample-support'
+  elif not centroid_supported:
+    reason = 'centroid'
+  elif not sample_mean_supported:
+    reason = 'sample-mean'
+  elif not claim_supported:
+    reason = 'claimed-mismatch'
   elif not strong_match and not separated:
     reason = 'ambiguous'
 
   return {
     'user': best['user'],
     'distance': round(float(best['distance']), 4),
+    'centroidDistance': round(float(best['centroidDistance']), 4),
     'secondDistance': round(second_distance, 4) if np.isfinite(second_distance) else None,
     'margin': round(margin, 4) if np.isfinite(second_distance) else None,
     'sampleMeanDistance': round(float(best['sampleMeanDistance']), 4),
     'sampleSupport': int(best['supportCount']),
+    'requiredSupport': int(best['requiredSupport']),
     'sampleCount': int(best['sampleCount']),
     'matched': matched,
     'reason': reason,
@@ -2911,7 +3046,8 @@ def perform_access_scan(db: Session, input_data: AccessScanInput) -> dict[str, A
       frames_captured=input_data.capturedFrames,
     )
 
-  match = _find_best_user_match(db, encoding)
+  claimed_user_id = str(input_data.userId or '').strip() or None
+  match = _find_best_user_match(db, encoding, claimed_user_id=claimed_user_id)
   user = match['user'] if match else None
   best_distance = float(match['distance']) if match else 1.0
   confidence = _distance_to_confidence(best_distance)
@@ -2939,6 +3075,12 @@ def perform_access_scan(db: Session, input_data: AccessScanInput) -> dict[str, A
       retry_message = 'Face matches multiple members too closely. Move closer and try again.'
     elif match and match.get('reason') == 'sample-support':
       retry_message = 'Face detected, but match support is weak. Hold steady and try again.'
+    elif match and match.get('reason') == 'centroid':
+      retry_message = 'Identity is not stable enough yet. Look straight at the camera and try again.'
+    elif match and match.get('reason') == 'sample-mean':
+      retry_message = 'Verification is inconsistent across enrolled samples. Hold steady and try again.'
+    elif match and match.get('reason') == 'claimed-mismatch':
+      retry_message = 'Face lock changed during verification. Keep one face centered and try again.'
 
     return _build_scan_response(
       status='retry',
