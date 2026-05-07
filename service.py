@@ -186,6 +186,13 @@ MEDIA_STORAGE = MediaStorage(get_settings(), STORAGE_ROOT)
 
 FACE_MATCH_THRESHOLD = 0.47
 FACE_RETRY_THRESHOLD = 0.58
+FACE_STRONG_MATCH_THRESHOLD = 0.42
+FACE_MIN_MATCH_MARGIN = 0.045
+FACE_SUPPORT_DISTANCE_BUFFER = 0.03
+FACE_MIN_DETECTION_EDGE = int(os.getenv('CAPERCLUB_FACE_MIN_DETECTION_EDGE', '960'))
+FACE_MAX_DETECTION_EDGE = int(os.getenv('CAPERCLUB_FACE_MAX_DETECTION_EDGE', '1600'))
+FACE_ENCODING_JITTERS = max(1, int(os.getenv('CAPERCLUB_FACE_ENCODING_JITTERS', '2')))
+FACE_DETECTION_MODEL = os.getenv('CAPERCLUB_FACE_DETECTION_MODEL', 'hog').strip().lower() or 'hog'
 COOLDOWN_SECONDS = 300
 ENTRY_DUPLICATE_SECONDS = 30
 MIN_EXIT_SECONDS = 300
@@ -1358,6 +1365,31 @@ def _load_rgb_image(image_bytes: bytes) -> np.ndarray:
   return np.ascontiguousarray(np.array(image))
 
 
+def _prepare_face_image(image: np.ndarray) -> np.ndarray:
+  from PIL import Image
+
+  height, width = image.shape[:2]
+  longest_edge = max(width, height)
+  if longest_edge <= 0:
+    return image
+
+  target_edge = longest_edge
+  if longest_edge < FACE_MIN_DETECTION_EDGE:
+    target_edge = FACE_MIN_DETECTION_EDGE
+  elif longest_edge > FACE_MAX_DETECTION_EDGE:
+    target_edge = FACE_MAX_DETECTION_EDGE
+
+  if target_edge == longest_edge:
+    return image
+
+  scale = target_edge / longest_edge
+  resized = Image.fromarray(image).resize(
+    (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
+    Image.Resampling.LANCZOS,
+  )
+  return np.ascontiguousarray(np.array(resized))
+
+
 def _largest_face_location(
   locations: list[tuple[int, int, int, int]],
 ) -> tuple[int, int, int, int]:
@@ -1394,13 +1426,49 @@ def _extract_face_encoding(
   except Exception as error:  # noqa: BLE001
     raise ApiError('Unable to read image payload.', 400) from error
 
-  locations = face_recognition.face_locations(image, model='hog')
+  prepared_image = _prepare_face_image(image)
+  detection_passes = [
+    {'image': prepared_image, 'upsample': 1},
+    {'image': prepared_image, 'upsample': 2},
+  ]
+  if not np.array_equal(prepared_image, image):
+    detection_passes.append({'image': image, 'upsample': 1})
+
+  locations: list[tuple[int, int, int, int]] = []
+  detection_image = prepared_image
+  for detection_pass in detection_passes:
+    trial_image = detection_pass['image']
+    trial_locations = face_recognition.face_locations(
+      trial_image,
+      number_of_times_to_upsample=detection_pass['upsample'],
+      model=FACE_DETECTION_MODEL,
+    )
+    if trial_locations:
+      locations = trial_locations
+      detection_image = trial_image
+      break
 
   if not locations:
     return None, None, 'No face detected. Align your face and try again.'
 
   location = _largest_face_location(locations)
-  encodings = face_recognition.face_encodings(image, [location])
+  encodings = face_recognition.face_encodings(
+    detection_image,
+    [location],
+    num_jitters=FACE_ENCODING_JITTERS,
+  )
+
+  if detection_image.shape[:2] != image.shape[:2]:
+    scale_y = image.shape[0] / detection_image.shape[0]
+    scale_x = image.shape[1] / detection_image.shape[1]
+    top, right, bottom, left = location
+    location = (
+      int(round(top * scale_y)),
+      int(round(right * scale_x)),
+      int(round(bottom * scale_y)),
+      int(round(left * scale_x)),
+    )
+
   box = _normalize_face_box(location, width=image.shape[1], height=image.shape[0])
 
   if not encodings:
@@ -2566,7 +2634,7 @@ def get_user_embeddings(db: Session) -> list[dict[str, Any]]:
 def _find_best_user_match(
   db: Session,
   probe_encoding: np.ndarray,
-) -> tuple[User | None, float]:
+) -> dict[str, Any] | None:
   import face_recognition
 
   users = db.scalars(
@@ -2575,8 +2643,7 @@ def _find_best_user_match(
     .order_by(User.created_at.asc())
   ).all()
 
-  best_user: User | None = None
-  best_distance = 1.0
+  ranked_matches: list[dict[str, Any]] = []
 
   for user in users:
     if not user.face_embeddings:
@@ -2596,12 +2663,67 @@ def _find_best_user_match(
     if len(distances) == 0:
       continue
 
-    user_distance = float(np.min(distances))
-    if user_distance < best_distance:
-      best_distance = user_distance
-      best_user = user
+    sorted_distances = sorted(float(value) for value in distances)
+    top_sample_distances = sorted_distances[: min(3, len(sorted_distances))]
+    support_limit = FACE_MATCH_THRESHOLD + FACE_SUPPORT_DISTANCE_BUFFER
+    support_count = sum(1 for value in sorted_distances if value <= support_limit)
+    sample_mean_distance = (
+      sum(top_sample_distances) / len(top_sample_distances)
+      if top_sample_distances
+      else sorted_distances[0]
+    )
 
-  return best_user, best_distance
+    ranked_matches.append({
+      'user': user,
+      'distance': sorted_distances[0],
+      'sampleMeanDistance': sample_mean_distance,
+      'supportCount': support_count,
+      'sampleCount': len(sorted_distances),
+      'hasSampleSet': len(sorted_distances) >= 3,
+    })
+
+  if not ranked_matches:
+    return None
+
+  ranked_matches.sort(key=lambda item: item['distance'])
+  best = ranked_matches[0]
+  runner_up = next(
+    (
+      candidate
+      for candidate in ranked_matches[1:]
+      if str(candidate['user'].id) != str(best['user'].id)
+    ),
+    None,
+  )
+  second_distance = float(runner_up['distance']) if runner_up else float('inf')
+  margin = second_distance - float(best['distance'])
+  strong_match = float(best['distance']) <= FACE_STRONG_MATCH_THRESHOLD
+  separated = not np.isfinite(second_distance) or margin >= FACE_MIN_MATCH_MARGIN
+  sample_supported = (not best['hasSampleSet']) or int(best['supportCount']) >= 2 or strong_match
+  matched = (
+    float(best['distance']) <= FACE_MATCH_THRESHOLD
+    and sample_supported
+    and (strong_match or separated)
+  )
+  reason = ''
+  if float(best['distance']) > FACE_MATCH_THRESHOLD:
+    reason = 'distance'
+  elif not sample_supported:
+    reason = 'sample-support'
+  elif not strong_match and not separated:
+    reason = 'ambiguous'
+
+  return {
+    'user': best['user'],
+    'distance': round(float(best['distance']), 4),
+    'secondDistance': round(second_distance, 4) if np.isfinite(second_distance) else None,
+    'margin': round(margin, 4) if np.isfinite(second_distance) else None,
+    'sampleMeanDistance': round(float(best['sampleMeanDistance']), 4),
+    'sampleSupport': int(best['supportCount']),
+    'sampleCount': int(best['sampleCount']),
+    'matched': matched,
+    'reason': reason,
+  }
 
 
 def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
@@ -2806,7 +2928,9 @@ def perform_access_scan(db: Session, input_data: AccessScanInput) -> dict[str, A
       frames_captured=input_data.capturedFrames,
     )
 
-  user, best_distance = _find_best_user_match(db, encoding)
+  match = _find_best_user_match(db, encoding)
+  user = match['user'] if match else None
+  best_distance = float(match['distance']) if match else 1.0
   confidence = _distance_to_confidence(best_distance)
 
   if user is None or best_distance > FACE_RETRY_THRESHOLD:
@@ -2826,10 +2950,16 @@ def perform_access_scan(db: Session, input_data: AccessScanInput) -> dict[str, A
       frames_captured=input_data.capturedFrames,
     )
 
-  if best_distance > FACE_MATCH_THRESHOLD:
+  if not bool(match and match.get('matched')):
+    retry_message = 'Face detected, but confidence is low. Try again.'
+    if match and match.get('reason') == 'ambiguous':
+      retry_message = 'Face matches multiple members too closely. Move closer and try again.'
+    elif match and match.get('reason') == 'sample-support':
+      retry_message = 'Face detected, but match support is weak. Hold steady and try again.'
+
     return _build_scan_response(
       status='retry',
-      message='Face detected, but confidence is low. Try again.',
+      message=retry_message,
       confidence=confidence,
       name=user.name,
       duplicate_warning=False,
