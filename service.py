@@ -67,6 +67,9 @@ _REQUIRED_MODEL_FILES = [
   'face_recognition_model-shard2',
 ]
 
+def get_face_models_dir() -> Path:
+  return MODELS_DIR
+
 def _ensure_face_models_available() -> None:
   """Ensure required offline dlib/face_recognition model files exist.
 

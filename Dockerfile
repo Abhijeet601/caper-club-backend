@@ -23,6 +23,10 @@ RUN pip install --upgrade pip setuptools wheel && \
 
 COPY . .
 
+RUN if [ -d /app/Frontend/models ]; then \
+      mkdir -p /app/models && cp -R /app/Frontend/models/. /app/models/; \
+    fi
+
 
 
 

@@ -67,6 +67,7 @@ if __package__:
     get_admin_slots,
     get_admin_users,
     get_face_enrollment_status,
+    get_face_models_dir,
     get_current_user_payload,
     get_session_timer,
     get_user_embeddings,
@@ -127,6 +128,7 @@ else:
     get_admin_slots,
     get_admin_users,
     get_face_enrollment_status,
+    get_face_models_dir,
     get_current_user_payload,
     get_session_timer,
     get_user_embeddings,
@@ -149,6 +151,7 @@ else:
 settings = get_settings()
 bearer_scheme = HTTPBearer(auto_error=False)
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / 'Frontend'
+FACE_MODELS_DIR = get_face_models_dir()
 
 
 @asynccontextmanager
@@ -616,6 +619,9 @@ def session_end(
 
 if FRONTEND_DIR.exists():
   app.mount('/', StaticFiles(directory=FRONTEND_DIR, html=True), name='frontend')
+
+if FACE_MODELS_DIR.exists():
+  app.mount('/models', StaticFiles(directory=FACE_MODELS_DIR), name='face-models')
 
 
 
