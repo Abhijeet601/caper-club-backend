@@ -405,17 +405,7 @@ def _action_cooldown_remaining_seconds(
   *,
   now: datetime | None = None,
 ) -> int:
-  if _serialize_attendance_action(getattr(user, 'last_action', None)) != 'OUT':
-    return 0
-
-  last_action_at = getattr(user, 'last_action_at', None)
-  if last_action_at is None:
-    return 0
-
-  reference = now or utcnow()
-  elapsed = int((reference - last_action_at).total_seconds())
-  remaining = COOLDOWN_SECONDS - elapsed
-  return max(0, remaining)
+  return 0
 
 
 def _club_now() -> datetime:
@@ -1573,14 +1563,7 @@ def _save_unknown_image(image_bytes: bytes) -> None:
 
 
 def _cooldown_remaining_seconds(db: Session, user_id: str) -> int:
-  latest_session = _latest_session_for_user(db, user_id)
-
-  if latest_session is None or latest_session.ended_at is None:
-    return 0
-
-  elapsed = int((utcnow() - latest_session.ended_at).total_seconds())
-  remaining = COOLDOWN_SECONDS - elapsed
-  return max(0, remaining)
+  return 0
 
 
 def _entry_duplicate_remaining_seconds(session: SessionRecord) -> int:
@@ -2731,7 +2714,7 @@ def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
   _expire_overdue_sessions(db, user.id)
 
   attendance_time = utcnow()
-  action = _serialize_attendance_action(input_data.action) or 'IN'
+  action = 'IN'
   confidence = round(float(input_data.confidence or 0), 2)
   area = input_data.area
   active_session = _active_session_for_user(db, user.id)
@@ -2757,7 +2740,7 @@ def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
     if action == 'IN':
       return _build_scan_response(
         status='duplicate',
-        message='Entry already marked. Exit is pending.',
+        message=f'Check-in already active. Auto checkout happens after {SESSION_LIMIT_MINUTES} minutes.',
         confidence=confidence,
         name=user.name,
         duplicate_warning=True,
@@ -2993,6 +2976,20 @@ def perform_access_scan(db: Session, input_data: AccessScanInput) -> dict[str, A
   active_session = _active_session_for_user(db, user.id)
 
   if active_session is not None:
+    return _build_scan_response(
+      status='duplicate',
+      message=f'Check-in already active. Auto checkout happens after {SESSION_LIMIT_MINUTES} minutes.',
+      confidence=confidence,
+      name=user.name,
+      duplicate_warning=True,
+      tts_message='à¤†à¤ªà¤•à¥€ à¤…à¤Ÿà¥‡à¤‚à¤¡à¥‡à¤‚à¤¸ à¤ªà¤¹à¤²à¥‡ à¤¸à¥‡ à¤®à¤¾à¤°à¥à¤• à¤¹à¥ˆà¥¤',
+      attendance_action='in',
+      session=_serialize_session(active_session),
+      cooldown_remaining_seconds=0,
+      face_box=face_box,
+      area=input_data.area,
+      frames_captured=input_data.capturedFrames,
+    )
     duplicate_remaining = _entry_duplicate_remaining_seconds(active_session)
 
     if duplicate_remaining > 0:
@@ -3149,33 +3146,10 @@ def start_session(db: Session, input_data: SessionStartInput) -> dict[str, Any]:
 
 
 def end_session(db: Session, input_data: SessionEndInput) -> dict[str, Any]:
-  _expire_overdue_sessions(db)
-  session = _get_session_by_id(db, input_data.sessionId)
-
-  if session.status != SessionStatus.ACTIVE:
-    raise ApiError('Session is not active.', 400)
-
-  ended_at = utcnow()
-  exit_lock_remaining = _exit_lock_remaining_seconds(session, ended_at)
-  if exit_lock_remaining > 0:
-    raise ApiError(f'Please wait {_format_wait_time(exit_lock_remaining)} before exit.', 400)
-
-  session.status = SessionStatus.ENDED
-  session.ended_at = ended_at
-  session.user.last_action = 'OUT'
-  session.user.last_action_at = ended_at
-  session.user.updated_at = ended_at
-  duration_minutes = _session_duration_minutes(session)
-  _create_timeline_event(
-    db,
-    user=session.user,
-    event_type=TimelineEventType.EXIT,
-    area=session.area,
-    total_minutes=duration_minutes,
-    note='Manual session end',
+  raise ApiError(
+    f'Manual checkout is disabled. Sessions end automatically after {SESSION_LIMIT_MINUTES} minutes.',
+    400,
   )
-  db.commit()
-  return _serialize_session(_get_session_by_id(db, session.id))
 
 
 def get_admin_announcements(db: Session) -> list[dict[str, Any]]:
