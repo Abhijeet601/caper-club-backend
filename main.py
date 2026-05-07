@@ -172,13 +172,17 @@ app = FastAPI(
   docs_url='/docs',
   redoc_url='/redoc',
 )
+# CORS: must allow browser origin to call the backend from the UI.
+# Use explicit wildcard origins but DISABLE credentials when using '*'.
+# This prevents the browser from blocking /access/scan with CORS.
 app.add_middleware(
   CORSMiddleware,
-  allow_origins=['*'],  # Allow all for demo
-  allow_credentials=True,
+  allow_origins=['*'],
+  allow_credentials=False,
   allow_methods=['*'],
   allow_headers=['*'],
 )
+
 
 # Mount smart door lock router (POST /door/unlock, POST /door/lock, GET /door/status)
 app.include_router(door_lock_router)
