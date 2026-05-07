@@ -23,13 +23,6 @@ RUN pip install --upgrade pip setuptools wheel && \
 
 COPY . .
 
-RUN if [ -d /app/Frontend/models ]; then \
-      mkdir -p /app/models && cp -R /app/Frontend/models/. /app/models/; \
-    fi
-
-
-
-
 EXPOSE 8080
 
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]

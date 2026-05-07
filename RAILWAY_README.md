@@ -13,7 +13,7 @@ Set the following environment variable in your Railway deployment:
 ```bash
 CAPERCLUB_DATABASE_URL=mysql://your_railway_connection_string_here
 CAPERCLUB_DOOR_LOCK_API_KEY=replace-with-a-long-random-secret
-DOOR_LOCK_DELAY_SECONDS=5
+CAPERCLUB_FACE_MODELS_DIR=/app/models
 ```
 
 ### Local Development
@@ -30,6 +30,7 @@ The backend is designed to run on Railway with the following configuration:
 
 - **Database**: Railway MySQL (always)
 - **Environment**: Production
+- **Face model folder**: `backend/models` in the repo, available at `/app/models` in the container
 - **Build Command**: `pip install -r requirements.txt`
 - **Start Command**: `uvicorn backend.main:app --host 0.0.0.0 --port $PORT`
 
@@ -55,5 +56,7 @@ Do not expose `CAPERCLUB_DOOR_LOCK_API_KEY` in frontend JavaScript.
 
 - Never use local MySQL for development
 - Always use Railway database connection string
+- Keep the offline face model shard files inside `backend/models`
+- On Railway, set `CAPERCLUB_FACE_MODELS_DIR=/app/models`
 - The `.env` file contains the production Railway configuration
 - Local database fallbacks are deprecated and should not be used

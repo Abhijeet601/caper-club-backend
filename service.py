@@ -39,17 +39,16 @@ if (not MODELS_DIR) or str(MODELS_DIR) in {'.', ''}:
 
   candidates = []
 
-  # If Docker copied weights, WORKDIR is /app and we copied models to /app/models.
+  # Canonical deployment path when model weights are placed under backend/models.
   candidates.append(Path.cwd() / 'models')
 
-  # In repo dev, Frontend/models is in repo root: ./Frontend/models
-  # When running from repo root, use cwd.
+  # Legacy fallback for older repo layouts that still keep models under Frontend/models.
   candidates.append(Path.cwd() / 'Frontend' / 'models')
 
   # Also try paths relative to this file.
+  candidates.append(Path(__file__).resolve().parent / 'models')
   candidates.append(Path(__file__).resolve().parent.parent / 'Frontend' / 'models')
   candidates.append(Path(__file__).resolve().parent.parent / 'models')
-  candidates.append(Path(__file__).resolve().parent / 'models')
 
 
   for candidate in candidates:
@@ -93,7 +92,7 @@ def _ensure_face_models_available() -> None:
       'Offline face model files are missing. '
       f'MODELS_DIR={MODELS_DIR} missing={missing}. '
       'Fix: set CAPERCLUB_FACE_MODELS_DIR to the folder containing these weights '
-      '(e.g. Frontend/models) or mount/copy weights into the container.'
+      '(e.g. backend/models or /app/models) or mount/copy weights into the container.'
     )
 
 
