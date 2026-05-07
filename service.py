@@ -67,17 +67,26 @@ _REQUIRED_MODEL_FILES = [
   'face_recognition_model-shard2',
 ]
 
-_missing = [name for name in _REQUIRED_MODEL_FILES if not (MODELS_DIR / name).exists()]
-if _missing:
-  # Don't fail hard at import-time. Missing weights will be detected on first scan.
-  # This prevents breaking non-face parts of the backend.
-  import logging
+def _ensure_face_models_available() -> None:
+  """Ensure required offline dlib/face_recognition model files exist.
 
-  logging.getLogger(__name__).warning(
-    'Face recognition offline model files are missing. '
-    'Scans will fail until you fix model bundling. '
-    f'MODELS_DIR={MODELS_DIR} missing={_missing}'
-  )
+  Runs lazily on first recognition call to avoid import-time side effects.
+  """
+  # Re-resolve in case env var was set after import.
+  global MODELS_DIR
+  if not MODELS_DIR or (isinstance(MODELS_DIR, Path) and str(MODELS_DIR) == '.'):
+    # Keep existing auto-detection, but don't crash during import.
+    pass
+
+  missing = [name for name in _REQUIRED_MODEL_FILES if not (MODELS_DIR / name).exists()]
+  if missing:
+    raise RuntimeError(
+      'Offline face model files are missing. '
+      f'MODELS_DIR={MODELS_DIR} missing={missing}. '
+      'Fix: set CAPERCLUB_FACE_MODELS_DIR to the folder containing these weights '
+      '(e.g. Frontend/models) or mount/copy weights into the container.'
+    )
+
 
 
 
@@ -1368,7 +1377,9 @@ def _normalize_face_box(
 def _extract_face_encoding(
   image_bytes: bytes,
 ) -> tuple[np.ndarray | None, dict[str, float] | None, str | None]:
+  _ensure_face_models_available()
   import face_recognition
+
 
   try:
     image = _load_rgb_image(image_bytes)
