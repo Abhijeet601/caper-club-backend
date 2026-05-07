@@ -25,7 +25,12 @@ from sqlalchemy.orm import Session, load_only, selectinload
 
 # Ensure face_recognition/dlib can find bundled offline model files.
 # This avoids slow first-run downloads/cold-start delays when running the backend.
-MODELS_DIR = Path(os.getenv('CAPPERCLUB_FACE_MODELS_DIR', '')).expanduser().resolve() if os.getenv('CAPPERCLUB_FACE_MODELS_DIR') else Path()
+_MODELS_DIR_ENV = (
+  os.getenv('CAPERCLUB_FACE_MODELS_DIR')
+  or os.getenv('CAPPERCLUB_FACE_MODELS_DIR')
+  or ''
+).strip()
+MODELS_DIR = Path(_MODELS_DIR_ENV).expanduser().resolve() if _MODELS_DIR_ENV else Path()
 
 # Determine bundled model directory robustly for both local runs and Docker.
 # NOTE: MODELS_DIR may be '.' which is a valid Path but probably not the correct folder.
@@ -58,6 +63,7 @@ if (not MODELS_DIR) or str(MODELS_DIR) in {'.', ''}:
 # (If a hook is unused by the installed dlib version, it is harmless.)
 os.environ.setdefault('DLIB_MODEL_PATH', str(MODELS_DIR))
 os.environ.setdefault('FACE_RECOGNITION_MODELS_PATH', str(MODELS_DIR))
+os.environ.setdefault('CAPERCLUB_FACE_MODELS_DIR', str(MODELS_DIR))
 os.environ.setdefault('CAPPERCLUB_FACE_MODELS_DIR', str(MODELS_DIR))
 
 _REQUIRED_MODEL_FILES = [
