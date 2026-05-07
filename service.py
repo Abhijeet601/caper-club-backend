@@ -3288,10 +3288,32 @@ def start_session(db: Session, input_data: SessionStartInput) -> dict[str, Any]:
 
 
 def end_session(db: Session, input_data: SessionEndInput) -> dict[str, Any]:
-  raise ApiError(
-    f'Manual checkout is disabled. Sessions end automatically after {SESSION_LIMIT_MINUTES} minutes.',
-    400,
+  session = _get_session_by_id(db, input_data.sessionId)
+
+  if session.status != SessionStatus.ACTIVE:
+    raise ApiError('This session is already closed.', 400)
+
+  ended_at = utcnow()
+  session.ended_at = ended_at
+  session.status = SessionStatus.ENDED
+  duration_minutes = _session_duration_minutes(session)
+
+  user = session.user
+  user.last_action = 'OUT'
+  user.last_action_at = ended_at
+  user.updated_at = ended_at
+
+  _create_timeline_event(
+    db,
+    user=user,
+    event_type=TimelineEventType.EXIT,
+    area=session.area,
+    total_minutes=duration_minutes,
+    note='Manual session end by admin',
   )
+  db.commit()
+
+  return _serialize_session(_get_session_by_id(db, session.id))
 
 
 def get_admin_announcements(db: Session) -> list[dict[str, Any]]:
@@ -3322,9 +3344,17 @@ def get_admin_sessions(
   session_query = _admin_session_query()
 
   if normalized_scope == 'live':
-    # Return all sessions for live dashboard to ensure all active are shown
+    live_cutoff = utcnow() - timedelta(days=2)
     sessions = db.scalars(
-      session_query.order_by(SessionRecord.started_at.desc())
+      session_query
+      .where(
+        or_(
+          SessionRecord.status == SessionStatus.ACTIVE,
+          SessionRecord.started_at >= live_cutoff,
+        )
+      )
+      .order_by(SessionRecord.started_at.desc())
+      .limit(LIVE_DASHBOARD_SESSION_LIMIT)
     ).all()
   else:
     sessions = db.scalars(
