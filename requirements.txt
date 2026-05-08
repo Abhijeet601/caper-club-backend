@@ -19,3 +19,5 @@ opencv-python-headless>=4.10.0
 face_recognition
 cmake
 dlib-bin
+
+gunicorn
