@@ -199,7 +199,7 @@ FACE_MAX_BRIGHTNESS = float(os.getenv('CAPERCLUB_FACE_MAX_BRIGHTNESS', '240'))
 FACE_MIN_SHARPNESS = float(os.getenv('CAPERCLUB_FACE_MIN_SHARPNESS', '18'))
 FACE_MIN_DETECTION_EDGE = int(os.getenv('CAPERCLUB_FACE_MIN_DETECTION_EDGE', '960'))
 FACE_MAX_DETECTION_EDGE = int(os.getenv('CAPERCLUB_FACE_MAX_DETECTION_EDGE', '1600'))
-FACE_ENCODING_JITTERS = max(1, int(os.getenv('CAPERCLUB_FACE_ENCODING_JITTERS', '2')))
+FACE_ENCODING_JITTERS = max(1, int(os.getenv('CAPERCLUB_FACE_ENCODING_JITTERS', '1')))
 FACE_DETECTION_MODEL = os.getenv('CAPERCLUB_FACE_DETECTION_MODEL', 'hog').strip().lower() or 'hog'
 COOLDOWN_SECONDS = 300
 ENTRY_DUPLICATE_SECONDS = 30
@@ -231,6 +231,7 @@ _expire_overdue_sessions_last_by_user: dict[str, float] = {}
 _user_embeddings_cache_lock = Lock()
 _user_embeddings_cache_payload: list[dict[str, Any]] | None = None
 _user_embeddings_cache_at = 0.0
+_scan_processing_lock = Lock()
 
 # Matching cache (numpy encodings) to avoid bytes->numpy decoding + per-scan DB hydration.
 # Built from enrolled users only and used by _find_best_user_match().
@@ -741,6 +742,23 @@ def _serialize_session(session: SessionRecord) -> dict[str, Any]:
   }
 
 
+def _serialize_scan_session(session: SessionRecord) -> dict[str, Any]:
+  remaining_seconds = _session_remaining_seconds(session)
+  return {
+    'id': session.id,
+    'userId': session.user_id,
+    'name': session.user.name,
+    'area': session.area,
+    'status': session.status.value,
+    'confidence': round(float(session.confidence or 0), 2),
+    'startedAt': _serialize_datetime(session.started_at),
+    'endedAt': _serialize_datetime(session.ended_at),
+    'slotEndAt': _serialize_datetime(session.slot_end_at),
+    'remainingMinutes': (remaining_seconds + 59) // 60 if remaining_seconds else 0,
+    'remainingSeconds': remaining_seconds,
+  }
+
+
 def _serialize_timeline(item: UserTimeline) -> dict[str, Any]:
   return {
     'id': item.id,
@@ -1139,10 +1157,7 @@ def _get_user_by_id(db: Session, user_id: str) -> User:
 def _get_user_with_slot_by_id(db: Session, user_id: str) -> User:
   user = db.scalar(
     select(User)
-    .options(
-      selectinload(User.slot),
-      selectinload(User.timelines),
-    )
+    .options(selectinload(User.slot))
     .where(User.id == user_id)
   )
 
@@ -1191,7 +1206,33 @@ def _get_slot_by_id(db: Session, slot_id: str) -> TimeSlot:
 def _get_session_by_id(db: Session, session_id: str) -> SessionRecord:
   session = db.scalar(
     select(SessionRecord)
-    .options(selectinload(SessionRecord.user), selectinload(SessionRecord.slot))
+    .options(
+      load_only(
+        SessionRecord.id,
+        SessionRecord.user_id,
+        SessionRecord.area,
+        SessionRecord.status,
+        SessionRecord.confidence,
+        SessionRecord.started_at,
+        SessionRecord.ended_at,
+        SessionRecord.slot_id,
+        SessionRecord.slot_start_at,
+        SessionRecord.slot_end_at,
+      ),
+      selectinload(SessionRecord.user).load_only(
+        User.id,
+        User.name,
+        User.email,
+        User.member_id,
+        User.membership_plan,
+      ),
+      selectinload(SessionRecord.slot).load_only(
+        TimeSlot.id,
+        TimeSlot.name,
+        TimeSlot.start_time,
+        TimeSlot.end_time,
+      ),
+    )
     .where(SessionRecord.id == session_id)
   )
 
@@ -1204,7 +1245,33 @@ def _get_session_by_id(db: Session, session_id: str) -> SessionRecord:
 def _active_session_for_user(db: Session, user_id: str) -> SessionRecord | None:
   return db.scalar(
     select(SessionRecord)
-    .options(selectinload(SessionRecord.user), selectinload(SessionRecord.slot))
+    .options(
+      load_only(
+        SessionRecord.id,
+        SessionRecord.user_id,
+        SessionRecord.area,
+        SessionRecord.status,
+        SessionRecord.confidence,
+        SessionRecord.started_at,
+        SessionRecord.ended_at,
+        SessionRecord.slot_id,
+        SessionRecord.slot_start_at,
+        SessionRecord.slot_end_at,
+      ),
+      selectinload(SessionRecord.user).load_only(
+        User.id,
+        User.name,
+        User.email,
+        User.member_id,
+        User.membership_plan,
+      ),
+      selectinload(SessionRecord.slot).load_only(
+        TimeSlot.id,
+        TimeSlot.name,
+        TimeSlot.start_time,
+        TimeSlot.end_time,
+      ),
+    )
     .where(
       SessionRecord.user_id == user_id,
       SessionRecord.status == SessionStatus.ACTIVE,
@@ -1391,8 +1458,9 @@ def _decode_image_payload(image_data: str) -> bytes:
 def _load_rgb_image(image_bytes: bytes) -> np.ndarray:
   from PIL import Image
 
-  image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-  return np.ascontiguousarray(np.array(image))
+  with Image.open(io.BytesIO(image_bytes)) as image:
+    rgb_image = image.convert('RGB')
+    return np.asarray(rgb_image)
 
 
 _FACE_PRESCALE_THRESHOLD = 1200  # px — downscale before detection if larger
@@ -1432,7 +1500,7 @@ def _prepare_face_image(image: np.ndarray) -> np.ndarray:
     (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
     Image.Resampling.LANCZOS,
   )
-  return np.ascontiguousarray(np.array(resized))
+  return np.asarray(resized)
 
 
 def _largest_face_location(
@@ -1562,7 +1630,7 @@ def _extract_face_encoding(
     ])
 
   # If we actually resized the image, allow an additional quick try using the original.
-  if not np.array_equal(prepared_image, image):
+  if prepared_image.shape[:2] != image.shape[:2]:
     detection_passes.append({'image': image, 'upsample': int(os.getenv('CAPERCLUB_LIVE_UPSAMPLE_ORIG', '1')) if live_mode else 1})
 
   locations: list[tuple[int, int, int, int]] = []
@@ -1607,11 +1675,7 @@ def _extract_face_encoding(
     return None, box, quality_issue
 
   live_jitters = int(os.getenv('CAPERCLUB_LIVE_ENCODING_JITTERS', '1' if live_mode else str(FACE_ENCODING_JITTERS)))
-  encodings = face_recognition.face_encodings(
-    detection_image,
-    [location],
-    num_jitters=live_jitters,
-  )
+  encodings = face_recognition.face_encodings(detection_image, [location], num_jitters=live_jitters)
 
   location = scaled_location
   box = _normalize_face_box(location, width=image.shape[1], height=image.shape[0])
@@ -1619,7 +1683,9 @@ def _extract_face_encoding(
   if not encodings:
     return None, box, 'Face detected, but encoding failed. Try again.'
 
-  return _normalize_encoding_vector(encodings[0]), box, None
+  normalized_encoding = _normalize_encoding_vector(encodings[0])
+  del encodings
+  return normalized_encoding, box, None
 
 
 def _encoding_to_bytes(encoding: np.ndarray) -> bytes:
@@ -3016,10 +3082,7 @@ def _find_best_user_match(
   # Eagerly load slot and timelines to avoid lazy-load N+1 during serialization.
   user_row = db.scalar(
     select(User)
-    .options(
-      selectinload(User.slot),
-      selectinload(User.timelines),
-    )
+    .options(selectinload(User.slot))
     .where(User.id == best['user_id'])
   )
   if user_row is None:
