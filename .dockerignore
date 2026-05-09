@@ -1,0 +1,11 @@
+.venv
+venv
+**/__pycache__
+node_modules
+.git
+.pytest_cache
+.mypy_cache
+*.log
+storage
+data
+tts-test.wav
