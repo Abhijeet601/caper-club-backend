@@ -241,6 +241,17 @@ _match_cache_user_ids: list[str] | None = None
 _match_cache_encodings_by_user: dict[str, list[np.ndarray]] | None = None
 _match_cache_centroid_by_user: dict[str, np.ndarray] | None = None
 
+# Fast vectorized centroid matching:
+# - centroid_matrix rows align with user_id_by_index
+# - encodings_by_user keeps per-user sample sets for (optional) support computation
+_match_cache_user_id_by_index: list[str] | None = None
+_match_cache_centroid_matrix: np.ndarray | None = None  # shape: (U, 128)
+_match_cache_probe_centroid_normalized: np.ndarray | None = None  # unused, kept for debug clarity
+
+# Keep matching fast enough for real-time attendance marking.
+# "top-K" controls how many nearest users we consider for expensive support computations.
+_MATCH_TOP_K = max(1, int(os.getenv('CAPERCLUB_MATCH_TOP_K', '10')))
+
 
 class ApiError(Exception):
   def __init__(self, message: str, status_code: int = 400) -> None:
@@ -2755,8 +2766,10 @@ def _build_match_cache_if_needed(db: Session) -> None:
   - user_ids (order-preserving)
   - encodings_by_user: user_id -> list[np.ndarray] (128-d)
   - centroid_by_user: user_id -> np.ndarray (128-d)
+  - centroid_matrix: np.ndarray (U, 128) for vectorized centroid distance
   """
-  global _match_cache_at, _match_cache_user_ids, _match_cache_encodings_by_user, _match_cache_centroid_by_user
+  global _match_cache_at, _match_cache_user_ids, _match_cache_encodings_by_user
+  global _match_cache_centroid_by_user, _match_cache_user_id_by_index, _match_cache_centroid_matrix
 
   now = time.monotonic()
   with _match_cache_lock:
@@ -2765,6 +2778,8 @@ def _build_match_cache_if_needed(db: Session) -> None:
       and (now - _match_cache_at) < _match_cache_ttl_seconds
       and _match_cache_encodings_by_user is not None
       and _match_cache_centroid_by_user is not None
+      and _match_cache_user_id_by_index is not None
+      and _match_cache_centroid_matrix is not None
     ):
       return
 
@@ -2779,25 +2794,39 @@ def _build_match_cache_if_needed(db: Session) -> None:
   encodings_by_user: dict[str, list[np.ndarray]] = {}
   centroid_by_user: dict[str, np.ndarray] = {}
   user_ids: list[str] = []
+  centroid_rows: list[np.ndarray] = []
+  user_id_by_index: list[str] = []
 
   for user in users:
     encodings: list[np.ndarray] = []
     for embedding in user.face_embeddings:
       value = _encoding_from_bytes(embedding.embedding_vector)
       if value is not None and value.shape == (128,):
-        encodings.append(value)
+        # Keep as float32 for faster numpy ops.
+        encodings.append(np.asarray(value, dtype=np.float32))
 
     if not encodings:
       continue
 
-    user_ids.append(str(user.id))
-    encodings_by_user[str(user.id)] = encodings
-    centroid_by_user[str(user.id)] = _normalize_encoding_vector(np.mean(np.stack(encodings), axis=0))
+    user_id = str(user.id)
+    user_ids.append(user_id)
+    user_id_by_index.append(user_id)
+
+    centroid = np.mean(np.stack(encodings, axis=0), axis=0).astype(np.float32, copy=False)
+    centroid = _normalize_encoding_vector(centroid).astype(np.float32, copy=False)
+
+    encodings_by_user[user_id] = encodings
+    centroid_by_user[user_id] = centroid
+    centroid_rows.append(centroid)
+
+  centroid_matrix = np.stack(centroid_rows, axis=0).astype(np.float32, copy=False) if centroid_rows else np.empty((0, 128), dtype=np.float32)
 
   with _match_cache_lock:
     _match_cache_user_ids = user_ids
     _match_cache_encodings_by_user = encodings_by_user
     _match_cache_centroid_by_user = centroid_by_user
+    _match_cache_user_id_by_index = user_id_by_index
+    _match_cache_centroid_matrix = centroid_matrix
     _match_cache_at = time.monotonic()
 
 
@@ -2807,81 +2836,122 @@ def _find_best_user_match(
   *,
   claimed_user_id: str | None = None,
 ) -> dict[str, Any] | None:
-  import face_recognition
-
   # Ensure cache is built.
   _build_match_cache_if_needed(db)
 
-  # Snapshot cache references.
-  with _match_cache_lock:
-    user_ids = list(_match_cache_user_ids or [])
-    encodings_by_user = _match_cache_encodings_by_user or {}
-    centroid_by_user = _match_cache_centroid_by_user or {}
-
-  if not user_ids:
+  probe = np.asarray(probe_encoding, dtype=np.float32)
+  if probe.shape != (128,):
     return None
 
-  # We need:
-  # - best (may be constrained by claimed_user_id)
-  # - overall_best + runner_up (to compute separation/ambiguous logic)
+  with _match_cache_lock:
+    centroid_matrix = _match_cache_centroid_matrix
+    user_id_by_index = list(_match_cache_user_id_by_index or [])
+    encodings_by_user = _match_cache_encodings_by_user or {}
+
+  if centroid_matrix is None or centroid_matrix.size == 0 or not user_id_by_index:
+    return None
+
+  # Fast centroid distances for *all* users in one vectorized pass.
+  # d = ||a-b||_2
+  diffs = centroid_matrix - probe[None, :]
+  centroid_distances = np.sqrt(np.sum(diffs * diffs, axis=1, dtype=np.float32)).astype(np.float32, copy=False)
+
+  # Restrict expensive per-user support work to top-K nearest centroids.
+  k = min(len(user_id_by_index), _MATCH_TOP_K)
+  if k <= 0:
+    return None
+
+  topk_idx = np.argpartition(centroid_distances, k - 1)[:k]
+  # If a user is explicitly claimed, ensure we consider them even if they are not in top-K.
+  claimed_index = None
+  if claimed_user_id:
+    # user_id_by_index is aligned; linear scan only over U when claiming is rare.
+    for i, uid in enumerate(user_id_by_index):
+      if str(uid) == str(claimed_user_id):
+        claimed_index = i
+        break
+  if claimed_index is not None:
+    topk_idx = np.unique(np.concatenate([topk_idx, np.asarray([claimed_index], dtype=topk_idx.dtype)]))
+
+  topk_idx = topk_idx[np.argsort(centroid_distances[topk_idx])]
+
+  topk_user_ids = [user_id_by_index[int(i)] for i in topk_idx]
+
+  # Per-user expensive support computation only for top-K.
   candidates: list[dict[str, Any]] = []
 
-  def consider_candidate(user_id: str, known_encodings: list[np.ndarray]) -> dict[str, Any] | None:
-    distances = face_recognition.face_distance(known_encodings, probe_encoding)
-    if len(distances) == 0:
+  support_limit = FACE_MATCH_THRESHOLD + FACE_SUPPORT_DISTANCE_BUFFER
+
+  def consider_candidate_fast(user_id: str) -> dict[str, Any] | None:
+    known_encodings = encodings_by_user.get(user_id) or []
+    if not known_encodings:
       return None
 
-    sorted_distances = sorted(float(value) for value in distances)
-    centroid = centroid_by_user.get(user_id)
-    centroid_distance = (
-      float(face_recognition.face_distance([centroid], probe_encoding)[0])
-      if centroid is not None
-      else float('inf')
-    )
+    # Compute per-sample distances using numpy (no face_recognition calls).
+    # distances: shape (S,)
+    known = np.asarray(known_encodings, dtype=np.float32)  # (S, 128)
+    dif = known - probe[None, :]
+    distances = np.sqrt(np.sum(dif * dif, axis=1, dtype=np.float32)).astype(np.float32, copy=False)
 
-    top_sample_distances = sorted_distances[: min(3, len(sorted_distances))]
-    support_limit = FACE_MATCH_THRESHOLD + FACE_SUPPORT_DISTANCE_BUFFER
-    support_count = sum(1 for value in sorted_distances if value <= support_limit)
-    required_support = 3 if len(sorted_distances) >= 5 else (2 if len(sorted_distances) >= 3 else 1)
-    sample_mean_distance = (
-      sum(top_sample_distances) / len(top_sample_distances)
-      if top_sample_distances
-      else sorted_distances[0]
-    )
+    if distances.size == 0:
+      return None
 
+    # Fast stats without full sort when possible.
+    # Need:
+    # - best distance (min)
+    # - top sample mean (mean of 3 smallest)
+    # - supportCount (# <= support_limit)
+    # - requiredSupport based on sample size
+    # - centroidDistance already computed from centroid_distances, but keep here for exactness.
+    min_distance = float(np.min(distances))
+
+    s_count = int(distances.size)
+    required_support = 3 if s_count >= 5 else (2 if s_count >= 3 else 1)
+
+    support_count = int(np.sum(distances <= np.float32(support_limit)))
+    has_sample_set = s_count >= 3
+
+    # top 3 distances
+    if s_count >= 3:
+      smallest3 = np.partition(distances, 2)[:3]
+      sample_mean_distance = float(np.mean(smallest3))
+    else:
+      sample_mean_distance = float(np.mean(np.partition(distances, s_count - 1)[:s_count])) if s_count else float('inf')
+
+    # centroidDistance is filled after candidate creation using `topk_centroid_by_user`.
     return {
       'user_id': user_id,
-      'distance': sorted_distances[0],
-      'centroidDistance': centroid_distance,
+      'distance': min_distance,
+      'centroidDistance': float('inf'),
       'sampleMeanDistance': sample_mean_distance,
       'supportCount': support_count,
       'requiredSupport': required_support,
-      'sampleCount': len(sorted_distances),
-      'hasSampleSet': len(sorted_distances) >= 3,
+      'sampleCount': s_count,
+      'hasSampleSet': has_sample_set,
     }
 
-  for user_id in user_ids:
-    known_encodings = encodings_by_user.get(str(user_id))
-    if not known_encodings:
-      continue
+  # Build centroid distance lookup for only top-K (avoid any extra per-user work).
+  topk_centroid_by_user: dict[str, float] = {topk_user_ids[i]: float(centroid_distances[topk_idx[i]]) for i in range(len(topk_user_ids))}
 
-    candidate = consider_candidate(str(user_id), known_encodings)
-    if candidate:
-      candidates.append(candidate)
+  # Create candidates
+  for uid in topk_user_ids:
+    candidate = consider_candidate_fast(uid)
+    if not candidate:
+      continue
+    candidate['centroidDistance'] = topk_centroid_by_user.get(uid, float('inf'))
+    candidates.append(candidate)
 
   if not candidates:
     return None
 
+  # Sort candidates by best distance (what matching thresholds use).
   candidates.sort(key=lambda item: float(item['distance']))
 
   overall_best = candidates[0]
   runner_up = next((c for c in candidates if str(c['user_id']) != str(overall_best['user_id'])), None)
 
   if claimed_user_id:
-    best = next(
-      (c for c in candidates if str(c['user_id']) == str(claimed_user_id)),
-      None,
-    )
+    best = next((c for c in candidates if str(c['user_id']) == str(claimed_user_id)), None)
     if best is None:
       return None
   else:
@@ -2891,6 +2961,7 @@ def _find_best_user_match(
   margin = second_distance - float(best['distance'])
   strong_match = float(best['distance']) <= FACE_STRONG_MATCH_THRESHOLD
   separated = not np.isfinite(second_distance) or margin >= FACE_MIN_MATCH_MARGIN
+
   sample_supported = (
     (not best['hasSampleSet'])
     or int(best['supportCount']) >= int(best['requiredSupport'])
@@ -2899,6 +2970,7 @@ def _find_best_user_match(
   centroid_supported = float(best['centroidDistance']) <= FACE_CENTROID_MATCH_THRESHOLD or strong_match
   sample_mean_supported = float(best['sampleMeanDistance']) <= FACE_SAMPLE_MEAN_THRESHOLD or strong_match
   claim_supported = claimed_user_id is None or str(overall_best['user_id']) == str(claimed_user_id)
+
   matched = (
     float(best['distance']) <= FACE_MATCH_THRESHOLD
     and sample_supported
