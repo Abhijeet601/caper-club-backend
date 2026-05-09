@@ -184,13 +184,14 @@ for directory in (USER_STORAGE, SESSION_STORAGE, UNKNOWN_STORAGE):
 
 MEDIA_STORAGE = MediaStorage(get_settings(), STORAGE_ROOT)
 
-FACE_MATCH_THRESHOLD = 0.41
-FACE_RETRY_THRESHOLD = 0.5
-FACE_STRONG_MATCH_THRESHOLD = 0.37
-FACE_CENTROID_MATCH_THRESHOLD = 0.43
-FACE_SAMPLE_MEAN_THRESHOLD = 0.43
-FACE_MIN_MATCH_MARGIN = 0.08
-FACE_SUPPORT_DISTANCE_BUFFER = 0.02
+FACE_MATCH_THRESHOLD = float(os.getenv('CAPERCLUB_FACE_MATCH_THRESHOLD', '0.44'))
+FACE_RETRY_THRESHOLD = float(os.getenv('CAPERCLUB_FACE_RETRY_THRESHOLD', '0.5'))
+FACE_STRONG_MATCH_THRESHOLD = float(os.getenv('CAPERCLUB_FACE_STRONG_MATCH_THRESHOLD', '0.37'))
+FACE_CENTROID_MATCH_THRESHOLD = float(os.getenv('CAPERCLUB_FACE_CENTROID_MATCH_THRESHOLD', '0.43'))
+FACE_SAMPLE_MEAN_THRESHOLD = float(os.getenv('CAPERCLUB_FACE_SAMPLE_MEAN_THRESHOLD', '0.43'))
+FACE_MIN_MATCH_MARGIN = float(os.getenv('CAPERCLUB_FACE_MIN_MATCH_MARGIN', '0.08'))
+FACE_SUPPORT_DISTANCE_BUFFER = float(os.getenv('CAPERCLUB_FACE_SUPPORT_DISTANCE_BUFFER', '0.02'))
+FACE_MIN_SUPPORT = max(1, int(os.getenv('CAPERCLUB_FACE_MIN_SUPPORT', '2')))
 FACE_MIN_FACE_RATIO = float(os.getenv('CAPERCLUB_FACE_MIN_FACE_RATIO', '0.16'))
 FACE_MAX_CENTER_OFFSET_X = float(os.getenv('CAPERCLUB_FACE_MAX_CENTER_OFFSET_X', '0.22'))
 FACE_MAX_CENTER_OFFSET_Y = float(os.getenv('CAPERCLUB_FACE_MAX_CENTER_OFFSET_Y', '0.24'))
@@ -2990,7 +2991,7 @@ def _find_best_user_match(
     min_distance = float(np.min(distances))
 
     s_count = int(distances.size)
-    required_support = 3 if s_count >= 5 else (2 if s_count >= 3 else 1)
+    required_support = min(s_count, max(FACE_MIN_SUPPORT, 3 if s_count >= 5 else (2 if s_count >= 3 else 1)))
 
     support_count = int(np.sum(distances <= np.float32(support_limit)))
     has_sample_set = s_count >= 3
@@ -3511,6 +3512,24 @@ def perform_access_scan(db: Session, input_data: AccessScanInput) -> dict[str, A
     area=input_data.area,
     frames_captured=input_data.capturedFrames,
   )
+
+
+def perform_access_scan_bytes(
+  db: Session,
+  *,
+  image_bytes: bytes,
+  area: str,
+  captured_frames: int,
+  user_id: str | None = None,
+) -> dict[str, Any]:
+  payload = AccessScanInput(
+    userId=user_id,
+    area=area,
+    image=base64.b64encode(image_bytes).decode('ascii'),
+    capturedFrames=captured_frames,
+  )
+  with _scan_processing_lock:
+    return perform_access_scan(db, payload)
 
 
 def start_session(db: Session, input_data: SessionStartInput) -> dict[str, Any]:

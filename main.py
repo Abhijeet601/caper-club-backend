@@ -17,7 +17,7 @@ import logging
 from typing import Any
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, Response
@@ -81,6 +81,7 @@ if __package__:
     get_user_report,
     mark_attendance,
     perform_access_scan,
+    perform_access_scan_bytes,
     register_user,
     save_user_embeddings,
     seed_database,
@@ -142,6 +143,7 @@ else:
     get_user_report,
     mark_attendance,
     perform_access_scan,
+    perform_access_scan_bytes,
     register_user,
     save_user_embeddings,
     seed_database,
@@ -153,6 +155,7 @@ else:
 settings = get_settings()
 bearer_scheme = HTTPBearer(auto_error=False)
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / 'Frontend'
+FRONTEND_DIST_DIR = FRONTEND_DIR / 'dist'
 FACE_MODELS_DIR = get_face_models_dir()
 
 
@@ -507,7 +510,40 @@ def access_scan(
   _: User = Depends(get_current_admin),
   db: Session = Depends(get_db),
 ) -> dict:
-  return perform_access_scan(db, input_data)
+  result = perform_access_scan(db, input_data)
+  status = str(result.get('status') or '').lower()
+  sync_door_for_detection(
+    known_face=status not in {'unknown', 'retry', 'denied'},
+    name=result.get('name'),
+    force_lock=status in {'unknown', 'retry', 'denied'},
+  )
+  return result
+
+
+@app.post('/access/scan-upload')
+async def access_scan_upload(
+  area: str = Form(...),
+  capturedFrames: int = Form(default=3),
+  userId: str | None = Form(default=None),
+  image: UploadFile = File(...),
+  _: User = Depends(get_current_admin),
+  db: Session = Depends(get_db),
+) -> dict:
+  image_bytes = await image.read()
+  result = perform_access_scan_bytes(
+    db,
+    image_bytes=image_bytes,
+    area=area,
+    captured_frames=capturedFrames,
+    user_id=userId,
+  )
+  status = str(result.get('status') or '').lower()
+  sync_door_for_detection(
+    known_face=status not in {'unknown', 'retry', 'denied'},
+    name=result.get('name'),
+    force_lock=status in {'unknown', 'retry', 'denied'},
+  )
+  return result
 
 
 @app.post('/attendance')
@@ -663,11 +699,11 @@ def session_end(
   return end_session(db, input_data)
 
 
-if FRONTEND_DIR.exists():
-  app.mount('/', StaticFiles(directory=FRONTEND_DIR, html=True), name='frontend')
-
 if FACE_MODELS_DIR.exists():
   app.mount('/models', StaticFiles(directory=FACE_MODELS_DIR), name='face-models')
+
+if FRONTEND_DIST_DIR.exists():
+  app.mount('/', StaticFiles(directory=FRONTEND_DIST_DIR, html=True), name='frontend')
 
 
 
