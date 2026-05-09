@@ -11,7 +11,9 @@ ALWAYS USE RAILWAY DATABASE
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
+import logging
 from typing import Any
 
 import jwt
@@ -173,6 +175,9 @@ app = FastAPI(
   docs_url='/docs',
   redoc_url='/redoc',
 )
+
+logger = logging.getLogger(__name__)
+
 # CORS: must allow browser origin to call the backend from the UI.
 # Use explicit wildcard origins but DISABLE credentials when using '*'.
 # This prevents the browser from blocking /access/scan with CORS.
@@ -606,6 +611,47 @@ def user_report(
   db: Session = Depends(get_db),
 ) -> dict:
   return get_user_report(db, user_id)
+
+
+@app.get('/admin/user/{user_id}/images')
+def get_user_images(
+  user_id: str,
+  _: User = Depends(get_current_admin),
+) -> list[dict]:
+  """Get list of all captured/enrollment images for a user."""
+  from .media_storage import MEDIA_STORAGE
+  try:
+    prefix = f'users/{user_id}/faces/'
+    if MEDIA_STORAGE._use_r2():
+      import boto3
+      bucket_name = MEDIA_STORAGE._resolved_bucket_name()
+      client = boto3.client(
+        's3',
+        endpoint_url=MEDIA_STORAGE._resolved_endpoint_url(),
+        region_name=MEDIA_STORAGE.settings.r2_region or 'auto',
+        aws_access_key_id=MEDIA_STORAGE.settings.r2_access_key_id,
+        aws_secret_access_key=MEDIA_STORAGE.settings.r2_secret_access_key,
+      )
+      response = client.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
+      images = []
+      for obj in response.get('Contents', []):
+        key = obj['Key']
+        public_base = str(MEDIA_STORAGE.settings.r2_public_base_url or '').rstrip('/')
+        image_url = f'{public_base}/{key}'
+        images.append({'url': image_url, 'key': key, 'size': obj['Size'], 'modified': obj['LastModified'].isoformat()})
+      return sorted(images, key=lambda x: x['modified'], reverse=True)
+    else:
+      # Local storage
+      from pathlib import Path
+      images = []
+      user_dir = MEDIA_STORAGE.storage_root / Path(prefix)
+      if user_dir.exists():
+        for img_file in sorted(user_dir.glob('*.jpg'), reverse=True):
+          images.append({'url': f'/storage/{prefix}{img_file.name}', 'key': f'{prefix}{img_file.name}', 'size': img_file.stat().st_size, 'modified': datetime.fromtimestamp(img_file.stat().st_mtime).isoformat()})
+      return images
+  except Exception as e:
+    logger.error(f'Error listing user images: {e}')
+    return []
 
 
 @app.post('/session/end')
