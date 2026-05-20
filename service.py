@@ -740,6 +740,7 @@ def _admin_user_summary_query():
         TimeSlot.start_time,
         TimeSlot.end_time,
       ),
+      selectinload(User.face_embeddings).load_only(FaceEmbedding.image_data),
     )
     .where(User.role == UserRole.USER)
     .order_by(User.created_at.desc())
@@ -783,8 +784,15 @@ def _admin_session_query():
 def _first_face_asset_url(user: User) -> str | None:
   for embedding in user.face_embeddings:
     image_data = str(embedding.image_data or '').strip()
+    if not image_data:
+      continue
     if image_data.startswith('http://') or image_data.startswith('https://'):
       return image_data
+    if image_data.startswith('frontend-descriptor:') or image_data.startswith('data:'):
+      continue
+    cleaned_path = image_data.replace('\\', '/').lstrip('/')
+    if '/' in cleaned_path or cleaned_path.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif')):
+      return f'/media/{cleaned_path}'
   return None
 
 
@@ -851,7 +859,7 @@ def _serialize_user_summary(user: User) -> dict[str, Any]:
     'dueAmount': _resolve_due_amount(user),
     'paymentMode': _resolve_payment_mode(user),
     'paymentStatus': _resolve_payment_status(user),
-    'faceImageUrl': None,
+    'faceImageUrl': _first_face_asset_url(user),
     'lastAction': last_action,
     'lastActionAt': last_action_at,
     'lastTimestamp': last_action_at,
