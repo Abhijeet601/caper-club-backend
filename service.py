@@ -110,6 +110,13 @@ MEDIA_STORAGE = MediaStorage(get_settings(), STORAGE_ROOT)
 
 FACE_MATCH_THRESHOLD = 0.47
 FACE_RETRY_THRESHOLD = 0.58
+ATTENDANCE_MIN_CONFIDENCE = 0.34
+ATTENDANCE_MAX_MATCH_DISTANCE = 0.43
+ATTENDANCE_MIN_MATCH_MARGIN = 0.05
+ATTENDANCE_MIN_SAMPLE_SUPPORT = 2
+ATTENDANCE_MIN_STABLE_FRAMES = 3
+ATTENDANCE_MIN_DETECTOR_SCORE = 0.62
+ATTENDANCE_MIN_FACE_RATIO = 0.11
 COOLDOWN_SECONDS = 300
 ENTRY_DUPLICATE_SECONDS = 30
 MIN_EXIT_SECONDS = 300
@@ -1261,6 +1268,39 @@ def _feed_status_from_scan_status(status: str) -> str:
 def _distance_to_confidence(distance: float) -> float:
   scaled = max(0.0, min(1.0, 1.0 - (distance / 0.65)))
   return round(scaled, 2)
+
+
+def _attendance_signal_error(input_data: AttendanceInput) -> str | None:
+  confidence = round(float(input_data.confidence or 0), 2)
+  match_distance = input_data.matchDistance
+  match_margin = input_data.matchMargin
+  sample_support = input_data.sampleSupport
+  detector_score = input_data.detectorScore
+  face_ratio = input_data.faceRatio
+  stable_frames = input_data.stableFrames
+
+  if confidence < ATTENDANCE_MIN_CONFIDENCE:
+    return 'Face match confidence is too low. Please scan again.'
+
+  if match_distance is not None and match_distance > ATTENDANCE_MAX_MATCH_DISTANCE:
+    return 'Face distance is too weak. Please move closer and scan again.'
+
+  if match_margin is not None and match_margin < ATTENDANCE_MIN_MATCH_MARGIN:
+    return 'Face match is ambiguous. Please hold still and scan again.'
+
+  if sample_support is not None and sample_support < ATTENDANCE_MIN_SAMPLE_SUPPORT:
+    return 'Face match does not have enough enrollment support. Please scan again.'
+
+  if detector_score is not None and detector_score < ATTENDANCE_MIN_DETECTOR_SCORE:
+    return 'Face detection quality is low. Please look at the camera and try again.'
+
+  if face_ratio is not None and face_ratio < ATTENDANCE_MIN_FACE_RATIO:
+    return 'Face is too far from the camera. Please step closer and try again.'
+
+  if stable_frames is not None and stable_frames < ATTENDANCE_MIN_STABLE_FRAMES:
+    return 'Hold still for a moment so the camera can confirm your face.'
+
+  return None
 
 
 def _decode_image_payload(image_data: str) -> bytes:
@@ -2536,6 +2576,23 @@ def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
   area = input_data.area
   active_session = _active_session_for_user(db, user.id)
   today_session = _latest_session_for_user_on_date(db, user.id, _club_today())
+  signal_error = _attendance_signal_error(input_data)
+
+  if signal_error:
+    return _build_scan_response(
+      status='retry',
+      message=signal_error,
+      confidence=confidence,
+      name=user.name,
+      duplicate_warning=False,
+      tts_message='चेहरा साफ नहीं दिख रहा है। कृपया कैमरे की तरफ देखकर दोबारा कोशिश करें।',
+      attendance_action=None,
+      session=_serialize_session(active_session) if active_session is not None else None,
+      cooldown_remaining_seconds=0,
+      face_box=None,
+      area=area,
+      frames_captured=max(1, int(input_data.stableFrames or 1)),
+    )
 
   if _membership_status(user) == 'expired':
     return _build_scan_response(

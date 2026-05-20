@@ -335,8 +335,17 @@ class AttendanceInput(StrictModel):
   action: AttendanceActionLiteral
   area: str = Field(default='Capper Sports Club Entry', min_length=2, max_length=120)
   confidence: float = Field(default=0, ge=0, le=1)
+  matchDistance: float | None = Field(default=None, ge=0, le=2)
+  secondDistance: float | None = Field(default=None, ge=0, le=2)
+  matchMargin: float | None = Field(default=None, ge=0, le=2)
+  sampleSupport: int | None = Field(default=None, ge=0, le=20)
+  sampleCount: int | None = Field(default=None, ge=0, le=20)
+  detectorScore: float | None = Field(default=None, ge=0, le=1)
+  faceRatio: float | None = Field(default=None, ge=0, le=1)
+  stableFrames: int | None = Field(default=None, ge=0, le=20)
+  captureMode: str | None = Field(default=None, min_length=2, max_length=40)
 
-  @field_validator('userId', 'area', mode='before')
+  @field_validator('userId', 'area', 'captureMode', mode='before')
   @classmethod
   def strip_values(cls, value: object) -> object:
     return _normalize_text(value)
