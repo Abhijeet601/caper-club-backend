@@ -788,10 +788,20 @@ def _first_face_asset_url(user: User) -> str | None:
       continue
     if image_data.startswith('http://') or image_data.startswith('https://'):
       return image_data
-    if image_data.startswith('frontend-descriptor:') or image_data.startswith('data:'):
+    if image_data.startswith('data:image/'):
+      return image_data
+    if image_data.startswith('frontend-descriptor:'):
       continue
-    cleaned_path = image_data.replace('\\', '/').lstrip('/')
-    if '/' in cleaned_path or cleaned_path.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif')):
+    cleaned_path = image_data.replace('\\', '/').strip()
+    if cleaned_path.startswith('/'):
+      cleaned_path = cleaned_path[1:]
+    if cleaned_path.startswith('backend/storage/'):
+      cleaned_path = cleaned_path.split('backend/storage/', 1)[1]
+    elif cleaned_path.startswith('storage/'):
+      cleaned_path = cleaned_path.split('storage/', 1)[1]
+    if cleaned_path and all(ch.isalnum() or ch in '+/=' for ch in cleaned_path):
+      return f'data:image/jpeg;base64,{cleaned_path}'
+    if cleaned_path:
       return f'/media/{cleaned_path}'
   return None
 
