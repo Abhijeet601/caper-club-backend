@@ -504,7 +504,7 @@ def door_detection(
   _: User = Depends(get_current_admin),
 ) -> dict[str, Any]:
   status = str(payload.get('status') or '').lower()
-  known_face = bool(payload.get('knownFace')) and status not in {'unknown', 'retry', 'denied'}
+  known_face = bool(payload.get('knownFace')) and status in {'granted', 'duplicate', 'cooldown'}
   force_lock = bool(payload.get('forceLock')) or not known_face
   name = payload.get('name') if isinstance(payload.get('name'), str) else None
   return sync_door_for_detection(
