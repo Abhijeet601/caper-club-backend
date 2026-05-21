@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
 from sqlalchemy import text
@@ -15,6 +15,7 @@ DOOR_COMMAND_LOCK = 'LOCK'
 DOOR_COMMAND_UNLOCK = 'UNLOCK'
 DOOR_COMMANDS = {DOOR_COMMAND_LOCK, DOOR_COMMAND_UNLOCK}
 DOOR_API_KEY_ENV = 'CAPERCLUB_DOOR_LOCK_API_KEY'
+DOOR_UNLOCK_TTL_SECONDS = float(os.getenv('CAPERCLUB_DOOR_UNLOCK_TTL_SECONDS', '5.0'))
 
 
 def get_door_api_key() -> str:
@@ -66,9 +67,26 @@ def get_door_state() -> dict[str, str | None]:
   if row is None:
     return {'command': DOOR_COMMAND_LOCK, 'updatedAt': None}
 
+  command = str(row.command or DOOR_COMMAND_LOCK).upper()
+  updated_at = row.updated_at
+
+  if (
+    command == DOOR_COMMAND_UNLOCK
+    and updated_at is not None
+    and DOOR_UNLOCK_TTL_SECONDS > 0
+  ):
+    if updated_at.tzinfo is None:
+      updated_at_utc = updated_at.replace(tzinfo=timezone.utc)
+    else:
+      updated_at_utc = updated_at.astimezone(timezone.utc)
+
+    expires_at = updated_at_utc + timedelta(seconds=DOOR_UNLOCK_TTL_SECONDS)
+    if datetime.now(timezone.utc) >= expires_at:
+      return set_door_state(DOOR_COMMAND_LOCK)
+
   return {
-    'command': str(row.command or DOOR_COMMAND_LOCK).upper(),
-    'updatedAt': row.updated_at.isoformat() + 'Z' if row.updated_at else None,
+    'command': command,
+    'updatedAt': updated_at.isoformat() + 'Z' if updated_at else None,
   }
 
 
