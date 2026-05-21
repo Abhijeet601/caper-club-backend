@@ -108,10 +108,10 @@ for directory in (USER_STORAGE, SESSION_STORAGE, UNKNOWN_STORAGE):
 
 MEDIA_STORAGE = MediaStorage(get_settings(), STORAGE_ROOT)
 
-FACE_MATCH_THRESHOLD = 0.47
+FACE_MATCH_THRESHOLD = 0.38
 FACE_RETRY_THRESHOLD = 0.58
 COOLDOWN_SECONDS = 300
-ENTRY_DUPLICATE_SECONDS = 30
+ENTRY_DUPLICATE_SECONDS = 45
 MIN_EXIT_SECONDS = 300
 SESSION_LIMIT_MINUTES = 70
 SESSION_WARNING_MINUTES = 5
@@ -133,6 +133,8 @@ READ_SIDE_EXPIRY_TTL_SECONDS = 5.0
 USER_EMBEDDINGS_CACHE_TTL_SECONDS = 60.0
 LIVE_DASHBOARD_SESSION_LIMIT = 120
 LIVE_DASHBOARD_PAYMENT_LIMIT = 80
+RECENT_SCAN_EVENT_TTL_SECONDS = 15 * 60
+RUNTIME_CACHE_CLEANUP_INTERVAL_SECONDS = 60.0
 
 _expire_overdue_sessions_lock = Lock()
 _expire_overdue_sessions_last_all_at = 0.0
@@ -140,6 +142,8 @@ _expire_overdue_sessions_last_by_user: dict[str, float] = {}
 _user_embeddings_cache_lock = Lock()
 _user_embeddings_cache_payload: list[dict[str, Any]] | None = None
 _user_embeddings_cache_at = 0.0
+_runtime_cache_cleanup_lock = Lock()
+_runtime_cache_cleanup_at = 0.0
 
 
 class ApiError(Exception):
@@ -156,6 +160,42 @@ def _safe_json_loads(value: str) -> dict[str, Any] | None:
     return None
 
   return parsed if isinstance(parsed, dict) else None
+
+
+def _periodic_runtime_cleanup(*, force: bool = False) -> None:
+  global _runtime_cache_cleanup_at, _user_embeddings_cache_payload, _user_embeddings_cache_at
+
+  now = time.monotonic()
+  if not force and (now - _runtime_cache_cleanup_at) < RUNTIME_CACHE_CLEANUP_INTERVAL_SECONDS:
+    return
+
+  with _runtime_cache_cleanup_lock:
+    now = time.monotonic()
+    if not force and (now - _runtime_cache_cleanup_at) < RUNTIME_CACHE_CLEANUP_INTERVAL_SECONDS:
+      return
+
+    scan_cutoff = now - RECENT_SCAN_EVENT_TTL_SECONDS
+    while RECENT_SCAN_EVENTS and float(RECENT_SCAN_EVENTS[-1].get('_createdMonotonic', now)) < scan_cutoff:
+      RECENT_SCAN_EVENTS.pop()
+
+    stale_session_cutoff = now - max(READ_SIDE_EXPIRY_TTL_SECONDS * 4, 30.0)
+    stale_user_ids = [
+      cached_user_id
+      for cached_user_id, cached_at in _expire_overdue_sessions_last_by_user.items()
+      if cached_at < stale_session_cutoff
+    ]
+    for stale_user_id in stale_user_ids:
+      _expire_overdue_sessions_last_by_user.pop(stale_user_id, None)
+
+    with _user_embeddings_cache_lock:
+      if (
+        _user_embeddings_cache_payload is not None
+        and (now - _user_embeddings_cache_at) > max(USER_EMBEDDINGS_CACHE_TTL_SECONDS * 4, 300.0)
+      ):
+        _user_embeddings_cache_payload = None
+        _user_embeddings_cache_at = 0.0
+
+    _runtime_cache_cleanup_at = now
 
 
 def _default_member_id(user: User) -> str:
@@ -1586,7 +1626,9 @@ def _record_scan_event(
     'attendanceAction': attendance_action,
     'scannedAt': _serialize_datetime(utcnow()),
     'tone': _tone_from_scan_status(status).value,
+    '_createdMonotonic': time.monotonic(),
   }
+  _periodic_runtime_cleanup()
   RECENT_SCAN_EVENTS.appendleft(event)
   return event
 
@@ -2427,6 +2469,7 @@ def save_user_embeddings(
 
 def get_user_embeddings(db: Session) -> list[dict[str, Any]]:
   global _user_embeddings_cache_payload, _user_embeddings_cache_at
+  _periodic_runtime_cleanup()
 
   with _user_embeddings_cache_lock:
     if (
@@ -2527,6 +2570,7 @@ def _find_best_user_match(
 
 
 def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
+  _periodic_runtime_cleanup()
   user = _get_user_with_slot_by_id(db, input_data.userId)
   _expire_overdue_sessions(db, user.id)
 
@@ -2709,6 +2753,7 @@ def mark_attendance(db: Session, input_data: AttendanceInput) -> dict[str, Any]:
 
 
 def perform_access_scan(db: Session, input_data: AccessScanInput) -> dict[str, Any]:
+  _periodic_runtime_cleanup()
   image_bytes = _decode_image_payload(input_data.image)
   encoding, face_box, error_message = _extract_face_encoding(image_bytes)
 
