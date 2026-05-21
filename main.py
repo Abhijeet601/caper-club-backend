@@ -83,7 +83,6 @@ if __package__:
     start_session,
     update_slot,
     update_user,
-    MEDIA_STORAGE,
   )
 else:
   from db import SessionLocal, get_db, get_settings, initialize_database
@@ -144,7 +143,6 @@ else:
     start_session,
     update_slot,
     update_user,
-    MEDIA_STORAGE,
   )
 
 settings = get_settings()
@@ -592,8 +590,6 @@ def session_end(
 
 if FRONTEND_DIR.exists():
   app.mount('/app', StaticFiles(directory=FRONTEND_DIR, html=True), name='frontend')
-
-app.mount('/media', StaticFiles(directory=MEDIA_STORAGE.storage_root), name='media')
 
 
 
