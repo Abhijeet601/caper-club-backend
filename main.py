@@ -492,8 +492,9 @@ def attendance_mark(
   result = mark_attendance(db, input_data)
   status = str(result.get('status') or '').lower()
   sync_door_for_detection(
-    known_face=status not in {'unknown', 'retry', 'denied'},
+    known_face=status == 'granted',
     name=result.get('name'),
+    force_lock=status != 'granted',
   )
   return result
 
@@ -504,7 +505,7 @@ def door_detection(
   _: User = Depends(get_current_admin),
 ) -> dict[str, Any]:
   status = str(payload.get('status') or '').lower()
-  known_face = bool(payload.get('knownFace')) and status in {'granted', 'duplicate', 'cooldown'}
+  known_face = bool(payload.get('knownFace')) and status == 'granted'
   force_lock = bool(payload.get('forceLock')) or not known_face
   name = payload.get('name') if isinstance(payload.get('name'), str) else None
   return sync_door_for_detection(
